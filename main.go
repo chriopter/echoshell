@@ -76,6 +76,11 @@ type model struct {
 	previewText       string
 	updateBusy        bool
 	status            string
+	selectingRemote   bool
+	availableTargets  []string
+	selectedTarget    int
+	addingNewRemote   bool
+	newRemoteInput    string
 }
 
 func main() {
@@ -89,25 +94,132 @@ func run() error {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return errors.New("ssh is required")
 	}
-	selectedRemoteTarget = resolveRemoteTarget()
-	_ = rememberRemoteTarget(selectedRemoteTarget)
-	updateRepoDir = detectRepoDir()
-	if isLocalRemote() {
-		if _, err := exec.LookPath("tmux"); err != nil {
-			return errors.New("tmux is required for local mode")
+
+	// Load available targets
+	targets, err := loadAllTargets()
+	if err != nil || len(targets) == 0 {
+		targets = []string{"local"}
+	}
+
+	// Add "+ Add new..." option at the end
+	targets = append(targets, "+ Add new remote...")
+
+	// Find current/last used target
+	lastTarget := resolveRemoteTarget()
+	selectedIdx := 0
+	for i, t := range targets {
+		if t == lastTarget {
+			selectedIdx = i
+			break
 		}
 	}
-	m := model{status: "Loading sessions..."}
+
+	updateRepoDir = detectRepoDir()
+
+	m := model{
+		status:           "Select remote target...",
+		selectingRemote:  true,
+		availableTargets: targets,
+		selectedTarget:   selectedIdx,
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }
 
 func (m model) Init() tea.Cmd {
+	if m.selectingRemote {
+		return nil
+	}
 	return tea.Batch(loadCmd(), tickCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle remote selection mode
+	if m.selectingRemote {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.width = msg.Width
+			m.height = msg.Height
+			return m, nil
+		case tea.KeyMsg:
+			// Handle text input mode for new remote
+			if m.addingNewRemote {
+				switch msg.String() {
+				case "ctrl+c", "esc":
+					m.addingNewRemote = false
+					m.newRemoteInput = ""
+					return m, nil
+				case "enter":
+					if strings.TrimSpace(m.newRemoteInput) != "" {
+						selectedRemoteTarget = strings.TrimSpace(m.newRemoteInput)
+						_ = rememberRemoteTarget(selectedRemoteTarget)
+						if isLocalRemote() {
+							if _, err := exec.LookPath("tmux"); err != nil {
+								m.status = "Error: tmux is required for local mode"
+								m.addingNewRemote = false
+								m.newRemoteInput = ""
+								return m, nil
+							}
+						}
+						m.selectingRemote = false
+						m.addingNewRemote = false
+						m.newRemoteInput = ""
+						m.status = "Loading sessions..."
+						return m, tea.Batch(loadCmd(), tickCmd())
+					}
+					return m, nil
+				case "backspace":
+					if len(m.newRemoteInput) > 0 {
+						m.newRemoteInput = m.newRemoteInput[:len(m.newRemoteInput)-1]
+					}
+					return m, nil
+				default:
+					// Accept printable characters
+					if len(msg.String()) == 1 {
+						m.newRemoteInput += msg.String()
+					}
+					return m, nil
+				}
+			}
+
+			switch strings.ToLower(msg.String()) {
+			case "ctrl+c", "q", "esc":
+				return m, tea.Quit
+			case "up", "k":
+				if m.selectedTarget > 0 {
+					m.selectedTarget--
+				}
+				return m, nil
+			case "down", "j":
+				if m.selectedTarget < len(m.availableTargets)-1 {
+					m.selectedTarget++
+				}
+				return m, nil
+			case "enter":
+				selected := m.availableTargets[m.selectedTarget]
+				// Check if "+ Add new..." was selected
+				if strings.HasPrefix(selected, "+ Add new") {
+					m.addingNewRemote = true
+					m.newRemoteInput = ""
+					return m, nil
+				}
+				selectedRemoteTarget = selected
+				_ = rememberRemoteTarget(selectedRemoteTarget)
+				if isLocalRemote() {
+					if _, err := exec.LookPath("tmux"); err != nil {
+						m.status = "Error: tmux is required for local mode"
+						return m, nil
+					}
+				}
+				m.selectingRemote = false
+				m.status = "Loading sessions..."
+				return m, tea.Batch(loadCmd(), tickCmd())
+			}
+		}
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -220,9 +332,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.status = "Refreshing..."
 			return m, loadCmd()
-		case "t":
-			m.status = "Switching remote target..."
-			return m, cycleRemoteCmd()
 		case "u":
 			if m.updateBusy {
 				return m, nil
@@ -264,8 +373,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("echoshell")
+
+	// Remote selection view
+	if m.selectingRemote {
+		// Text input mode for new remote
+		if m.addingNewRemote {
+			help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("enter: confirm  esc: cancel")
+			heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Enter new remote (e.g., user@host):")
+
+			cursor := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Render("▊")
+			inputLine := m.newRemoteInput + cursor
+			inputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Padding(0, 1)
+
+			lines := []string{
+				heading,
+				"",
+				inputStyle.Render(inputLine),
+			}
+
+			box := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2).Render(strings.Join(lines, "\n"))
+			return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
+		}
+
+		help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("j/k or ↑/↓: navigate  enter: select  q: quit")
+		heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Select Remote Target:")
+
+		sel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
+		norm := lipgloss.NewStyle().Padding(0, 1)
+
+		lines := []string{heading, ""}
+		for i, target := range m.availableTargets {
+			line := target
+			if i == m.selectedTarget {
+				lines = append(lines, sel.Render(line))
+			} else {
+				lines = append(lines, norm.Render(line))
+			}
+		}
+
+		box := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2).Render(strings.Join(lines, "\n"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
+	}
+
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab repo  1..4 session  j/k session  n new  d destroy  t remote  u update  enter attach  r refresh  q quit")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab repo  1..4 session  j/k session  n new  d destroy  u update  enter attach  r refresh  q quit")
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
 	if len(m.groups) == 0 {
