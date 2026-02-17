@@ -25,6 +25,7 @@ ECHOSHELL_REMOTE=root@your-server ./echoshell
 - `j/k` or `up/down`: session up/down
 - `n`: create new session
 - `d`: destroy selected session
+- `t`: cycle remote target
 - `u`: update from `origin/main` and rebuild locally
 - `Enter`: attach
 - `r`: refresh

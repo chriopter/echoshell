@@ -59,6 +59,11 @@ type previewMsg struct {
 	err     error
 }
 
+type remoteMsg struct {
+	target string
+	err    error
+}
+
 type model struct {
 	width             int
 	height            int
@@ -160,6 +165,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case remoteMsg:
+		if msg.err != nil {
+			m.status = "Remote change failed: " + msg.err.Error()
+			return m, nil
+		}
+		selectedRemoteTarget = msg.target
+		_ = rememberRemoteTarget(selectedRemoteTarget)
+		m.status = "Switched to remote: " + remoteTarget()
+		return m, loadCmd()
+
 	case tea.KeyMsg:
 		switch strings.ToLower(msg.String()) {
 		case "ctrl+c", "q", "esc":
@@ -205,6 +220,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.status = "Refreshing..."
 			return m, loadCmd()
+		case "t":
+			m.status = "Switching remote target..."
+			return m, cycleRemoteCmd()
 		case "u":
 			if m.updateBusy {
 				return m, nil
@@ -247,7 +265,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("echoshell")
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab repo  1..4 session  j/k session  n new  d destroy  u update  enter attach  r refresh  q quit")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab repo  1..4 session  j/k session  n new  d destroy  t remote  u update  enter attach  r refresh  q quit")
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
 	if len(m.groups) == 0 {
@@ -488,6 +506,55 @@ func attachCmd(session string) tea.Cmd {
 		}
 		return actionMsg{status: "Detached from " + session}
 	})
+}
+
+func cycleRemoteCmd() tea.Cmd {
+	return func() tea.Msg {
+		targets, err := loadAllTargets()
+		if err != nil || len(targets) == 0 {
+			targets = []string{"local"}
+		}
+
+		// Find current target in list
+		current := remoteTarget()
+		nextIdx := 0
+		for i, t := range targets {
+			if t == current {
+				nextIdx = (i + 1) % len(targets)
+				break
+			}
+		}
+
+		return remoteMsg{target: targets[nextIdx]}
+	}
+}
+
+func loadAllTargets() ([]string, error) {
+	path, err := targetsPath()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []string{"local"}, nil
+	}
+
+	targets := []string{}
+	seen := make(map[string]bool)
+	for _, ln := range strings.Split(string(raw), "\n") {
+		v := strings.TrimSpace(ln)
+		if v != "" && !seen[v] {
+			targets = append(targets, v)
+			seen[v] = true
+		}
+	}
+
+	// Always ensure "local" is in the list
+	if !seen["local"] {
+		targets = append(targets, "local")
+	}
+
+	return targets, nil
 }
 
 func groupedSessions() ([]workspaceGroup, error) {
