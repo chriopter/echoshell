@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,9 +19,12 @@ import (
 const refreshInterval = 2 * time.Second
 const defaultRemoteTarget = "local"
 const maxPreviewLines = 8
+const workspaceAll = "all"
 
 var selectedRemoteTarget = ""
 var updateRepoDir = ""
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
+var repoGroupCache = map[string][]workspaceGroup{}
 
 type sessionInfo struct {
 	Name     string
@@ -30,9 +34,11 @@ type sessionInfo struct {
 }
 
 type workspaceGroup struct {
-	Name     string
-	Path     string
-	Sessions []sessionInfo
+	Workspace string
+	Repo      string
+	Name      string
+	Path      string
+	Sessions  []sessionInfo
 }
 
 type loadedMsg struct {
@@ -64,23 +70,45 @@ type remoteMsg struct {
 	err    error
 }
 
+type quickCandidate struct {
+	Workspace string
+	Repo      string
+	Session   sessionInfo
+	Score     int
+}
+
+type sessionTemplate struct {
+	Label   string
+	Name    string
+	Command string
+}
+
 type model struct {
-	width             int
-	height            int
-	groups            []workspaceGroup
-	selectedWorkspace int
-	selectedSession   int
-	activeWorkspace   string
-	activeSession     string
-	previewSession    string
-	previewText       string
-	updateBusy        bool
-	status            string
-	selectingRemote   bool
-	availableTargets  []string
-	selectedTarget    int
-	addingNewRemote   bool
-	newRemoteInput    string
+	width              int
+	height             int
+	groups             []workspaceGroup
+	selectedWorkspace  int
+	selectedSession    int
+	preferredWorkspace string
+	workspaceView      string
+	activeWorkspace    string
+	activeSession      string
+	previewSession     string
+	previewText        string
+	updateBusy         bool
+	status             string
+	selectingRemote    bool
+	availableTargets   []string
+	selectedTarget     int
+	addingNewRemote    bool
+	newRemoteInput     string
+	selectingNew       bool
+	newTemplates       []sessionTemplate
+	selectedTemplate   int
+	selectingQuick     bool
+	quickQuery         string
+	quickCandidates    []quickCandidate
+	selectedQuick      int
 }
 
 func main() {
@@ -95,17 +123,64 @@ func run() error {
 		return errors.New("ssh is required")
 	}
 
-	// Load available targets
+	lastTarget := resolveRemoteTarget()
+	selectedRemoteTarget = strings.TrimSpace(lastTarget)
+
+	targets, selectedIdx := loadTargetsForSelection(lastTarget)
+
+	updateRepoDir = detectRepoDir()
+	preferredWorkspace, _ := loadLastWorkspaceTarget(selectedRemoteTarget)
+	workspaceView := workspaceAll
+	if strings.TrimSpace(preferredWorkspace) != "" {
+		workspaceView = preferredWorkspace
+	}
+
+	m := model{
+		status:             "Loading sessions...",
+		selectingRemote:    false,
+		availableTargets:   targets,
+		selectedTarget:     selectedIdx,
+		preferredWorkspace: preferredWorkspace,
+		workspaceView:      workspaceView,
+		newTemplates:       defaultSessionTemplates(),
+	}
+
+	if os.Getenv("ECHOSHELL_SELECT_REMOTE") == "1" {
+		m.selectingRemote = true
+		m.status = "Select remote target..."
+	}
+
+	if isLocalRemote() {
+		if _, err := exec.LookPath("tmux"); err != nil {
+			return errors.New("tmux is required for local mode")
+		}
+	}
+
+	if len(os.Args) > 1 {
+		matches, qerr := findQuickCandidates(os.Args[1:])
+		if qerr == nil && len(matches) == 1 {
+			return attachSessionNow(matches[0].Session.Name)
+		}
+		if qerr == nil && len(matches) > 1 {
+			m.selectingQuick = true
+			m.quickQuery = strings.Join(os.Args[1:], " ")
+			m.quickCandidates = matches
+			m.selectedQuick = 0
+			m.status = fmt.Sprintf("%d matches for %q", len(matches), m.quickQuery)
+		}
+	}
+
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
+}
+
+func loadTargetsForSelection(lastTarget string) ([]string, int) {
 	targets, err := loadAllTargets()
 	if err != nil || len(targets) == 0 {
 		targets = []string{"local"}
 	}
-
-	// Add "+ Add new..." option at the end
 	targets = append(targets, "+ Add new remote...")
-
-	// Find current/last used target
-	lastTarget := resolveRemoteTarget()
 	selectedIdx := 0
 	for i, t := range targets {
 		if t == lastTarget {
@@ -113,22 +188,110 @@ func run() error {
 			break
 		}
 	}
+	return targets, selectedIdx
+}
 
-	updateRepoDir = detectRepoDir()
-
-	m := model{
-		status:           "Select remote target...",
-		selectingRemote:  true,
-		availableTargets: targets,
-		selectedTarget:   selectedIdx,
+func findQuickCandidates(tokens []string) ([]quickCandidate, error) {
+	groups, err := groupedSessions()
+	if err != nil {
+		return nil, err
 	}
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	_, err = p.Run()
-	return err
+	out := []quickCandidate{}
+	for _, g := range groups {
+		for _, s := range g.Sessions {
+			score, ok := scoreSessionMatch(tokens, g, s)
+			if !ok {
+				continue
+			}
+			out = append(out, quickCandidate{
+				Workspace: groupWorkspaceName(g),
+				Repo:      g.Repo,
+				Session:   s,
+				Score:     score,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].Session.Name != out[j].Session.Name {
+			return out[i].Session.Name < out[j].Session.Name
+		}
+		if out[i].Workspace != out[j].Workspace {
+			return out[i].Workspace < out[j].Workspace
+		}
+		return out[i].Repo < out[j].Repo
+	})
+	return out, nil
+}
+
+func scoreSessionMatch(tokens []string, g workspaceGroup, s sessionInfo) (int, bool) {
+	t := normalizeForMatch(strings.Join(tokens, " "))
+	if t == "" {
+		return 0, false
+	}
+	parts := strings.Fields(t)
+	if len(parts) == 0 {
+		return 0, false
+	}
+	hay := normalizeForMatch(strings.Join([]string{s.Name, g.Name, g.Workspace, g.Repo, s.Workdir}, " "))
+	score := 0
+	for _, p := range parts {
+		if strings.Contains(hay, p) {
+			score += 10 + len(p)
+			continue
+		}
+		if subseq(hay, p) {
+			score += 4 + len(p)
+			continue
+		}
+		return 0, false
+	}
+	if strings.Contains(hay, normalizeForMatch(s.Name)) {
+		score += 3
+	}
+	return score, true
+}
+
+func normalizeForMatch(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	space := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			space = false
+			continue
+		}
+		if !space {
+			b.WriteByte(' ')
+			space = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func subseq(hay, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	h := []rune(hay)
+	n := []rune(needle)
+	j := 0
+	for i := 0; i < len(h) && j < len(n); i++ {
+		if h[i] == n[j] {
+			j++
+		}
+	}
+	return j == len(n)
 }
 
 func (m model) Init() tea.Cmd {
-	if m.selectingRemote {
+	if m.selectingRemote || m.selectingQuick {
 		return nil
 	}
 	return tea.Batch(loadCmd(), tickCmd())
@@ -165,6 +328,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.selectingRemote = false
 						m.addingNewRemote = false
 						m.newRemoteInput = ""
+						m.preferredWorkspace, _ = loadLastWorkspaceTarget(selectedRemoteTarget)
+						m.workspaceView = workspaceAll
+						if strings.TrimSpace(m.preferredWorkspace) != "" {
+							m.workspaceView = m.preferredWorkspace
+						}
 						m.status = "Loading sessions..."
 						return m, tea.Batch(loadCmd(), tickCmd())
 					}
@@ -213,8 +381,86 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.selectingRemote = false
+				m.preferredWorkspace, _ = loadLastWorkspaceTarget(selectedRemoteTarget)
+				m.workspaceView = workspaceAll
+				if strings.TrimSpace(m.preferredWorkspace) != "" {
+					m.workspaceView = m.preferredWorkspace
+				}
+				m.activeWorkspace = ""
+				m.activeSession = ""
 				m.status = "Loading sessions..."
 				return m, tea.Batch(loadCmd(), tickCmd())
+			}
+		}
+		return m, nil
+	}
+
+	if m.selectingNew {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.width = msg.Width
+			m.height = msg.Height
+			return m, nil
+		case tea.KeyMsg:
+			switch strings.ToLower(msg.String()) {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc":
+				m.selectingNew = false
+				m.status = "Cancelled new session"
+				return m, nil
+			case "up", "k":
+				if m.selectedTemplate > 0 {
+					m.selectedTemplate--
+				}
+				return m, nil
+			case "down", "j":
+				if m.selectedTemplate < len(m.newTemplates)-1 {
+					m.selectedTemplate++
+				}
+				return m, nil
+			case "enter":
+				if len(m.newTemplates) == 0 {
+					m.selectingNew = false
+					m.status = "No session templates"
+					return m, nil
+				}
+				tpl := m.newTemplates[m.selectedTemplate]
+				m.selectingNew = false
+				m.status = "Creating " + tpl.Label + " session..."
+				return m, newSessionCmd(m.newSessionPath(), m.newSessionRepo(), tpl.Name, tpl.Command)
+			}
+		}
+		return m, nil
+	}
+
+	if m.selectingQuick {
+		switch msg := msg.(type) {
+		case tea.WindowSizeMsg:
+			m.width = msg.Width
+			m.height = msg.Height
+			return m, nil
+		case tea.KeyMsg:
+			switch strings.ToLower(msg.String()) {
+			case "ctrl+c", "q", "esc":
+				return m, tea.Quit
+			case "up", "k":
+				if m.selectedQuick > 0 {
+					m.selectedQuick--
+				}
+				return m, nil
+			case "down", "j":
+				if m.selectedQuick < len(m.quickCandidates)-1 {
+					m.selectedQuick++
+				}
+				return m, nil
+			case "enter":
+				if len(m.quickCandidates) == 0 {
+					return m, tea.Quit
+				}
+				name := m.quickCandidates[m.selectedQuick].Session.Name
+				m.status = "Attaching " + name + "..."
+				return m, attachCmd(name)
 			}
 		}
 		return m, nil
@@ -284,6 +530,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		selectedRemoteTarget = msg.target
 		_ = rememberRemoteTarget(selectedRemoteTarget)
+		m.preferredWorkspace, _ = loadLastWorkspaceTarget(selectedRemoteTarget)
+		m.workspaceView = workspaceAll
+		if strings.TrimSpace(m.preferredWorkspace) != "" {
+			m.workspaceView = m.preferredWorkspace
+		}
+		m.activeWorkspace = ""
+		m.activeSession = ""
 		m.status = "Switched to remote: " + remoteTarget()
 		return m, loadCmd()
 
@@ -292,39 +545,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "left", "h":
-			if m.selectedWorkspace > 0 {
-				m.selectedWorkspace--
+			if m.shiftWorkspaceView(-1) {
 				m.selectedSession = 0
 				m.captureActive()
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "right", "l":
-			if m.selectedWorkspace < len(m.groups)-1 {
-				m.selectedWorkspace++
+			if m.shiftWorkspaceView(1) {
 				m.selectedSession = 0
 				m.captureActive()
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "tab":
-			if len(m.groups) > 0 {
-				m.selectedWorkspace = (m.selectedWorkspace + 1) % len(m.groups)
+			if m.shiftWorkspaceView(1) {
+				m.selectedSession = 0
+				m.captureActive()
+				return m, previewCmdForSelection(m)
+			}
+			return m, nil
+		case "shift+tab":
+			if m.shiftWorkspaceView(-1) {
 				m.selectedSession = 0
 				m.captureActive()
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "up", "k":
-			if m.selectedSession > 0 {
-				m.selectedSession--
+			repos := m.repoIndexesForView()
+			cur := -1
+			for i, idx := range repos {
+				if idx == m.selectedWorkspace {
+					cur = i
+					break
+				}
+			}
+			if cur > 0 {
+				m.selectedWorkspace = repos[cur-1]
+				m.selectedSession = 0
 				m.captureActive()
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "down", "j":
-			if m.selectedSession < len(m.currentSessions())-1 {
-				m.selectedSession++
+			repos := m.repoIndexesForView()
+			cur := -1
+			for i, idx := range repos {
+				if idx == m.selectedWorkspace {
+					cur = i
+					break
+				}
+			}
+			if cur >= 0 && cur < len(repos)-1 {
+				m.selectedWorkspace = repos[cur+1]
+				m.selectedSession = 0
 				m.captureActive()
 				return m, previewCmdForSelection(m)
 			}
@@ -332,6 +607,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.status = "Refreshing..."
 			return m, loadCmd()
+		case "t":
+			last := remoteTarget()
+			m.availableTargets, m.selectedTarget = loadTargetsForSelection(last)
+			m.selectingRemote = true
+			m.addingNewRemote = false
+			m.newRemoteInput = ""
+			m.status = "Select remote target..."
+			return m, nil
 		case "u":
 			if m.updateBusy {
 				return m, nil
@@ -340,8 +623,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Updating from origin/main..."
 			return m, updateCmd()
 		case "n":
-			m.status = "Creating new session..."
-			return m, newSessionCmd(m.newSessionPath())
+			m.selectingNew = true
+			m.selectedTemplate = 0
+			m.status = "Pick command for new session"
+			return m, nil
 		case "d":
 			sel, ok := m.selectedSessionInfo()
 			if !ok {
@@ -415,8 +700,49 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
 	}
 
+	if m.selectingNew {
+		help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("j/k or ↑/↓: navigate  enter: create  esc: cancel")
+		heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("New Session Command:")
+
+		sel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
+		norm := lipgloss.NewStyle().Padding(0, 1)
+
+		lines := []string{heading, ""}
+		for i, t := range m.newTemplates {
+			line := t.Label
+			if i == m.selectedTemplate {
+				lines = append(lines, sel.Render(line))
+			} else {
+				lines = append(lines, norm.Render(line))
+			}
+		}
+
+		box := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2).Render(strings.Join(lines, "\n"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
+	}
+
+	if m.selectingQuick {
+		heading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Quick Attach: " + m.quickQuery)
+		help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("j/k or ↑/↓: navigate  enter: attach  esc: quit")
+		sel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
+		norm := lipgloss.NewStyle().Padding(0, 1)
+		lines := []string{heading, ""}
+		for i, c := range m.quickCandidates {
+			line := fmt.Sprintf("%s  (%s/%s)", c.Session.Name, c.Workspace, c.Repo)
+			if i == m.selectedQuick {
+				lines = append(lines, sel.Render(line))
+			} else {
+				lines = append(lines, norm.Render(line))
+			}
+		}
+		box := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2).Render(strings.Join(lines, "\n"))
+		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
+	}
+
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab repo  1..4 session  j/k session  n new  d destroy  u update  enter attach  r refresh  q quit")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab/s-tab workspace  j/k repo  1-4 session  enter attach")
+	helpActions := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("n new  d destroy  t target  r refresh  u update  q quit")
+	help := lipgloss.JoinVertical(lipgloss.Left, helpNav, helpActions)
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
 	if len(m.groups) == 0 {
@@ -439,20 +765,126 @@ func (m model) View() string {
 
 func (m model) renderWorkspaces(width int) string {
 	box := lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Repos")
+	view := m.workspaceViewName()
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Repo " + view)
 	sel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
-	norm := lipgloss.NewStyle().Padding(0, 1)
+	norm := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Padding(0, 1)
 
 	lines := []string{title, ""}
-	for i, g := range m.groups {
-		line := fmt.Sprintf("%s (%d)", g.Name, len(g.Sessions))
-		if i == m.selectedWorkspace {
-			lines = append(lines, sel.Render(line))
-		} else {
-			lines = append(lines, norm.Render(line))
+	if view == workspaceAll {
+		heading := lipgloss.NewStyle().Bold(true)
+		lastWorkspace := ""
+		for _, i := range m.repoIndexesForView() {
+			g := m.groups[i]
+			ws := groupWorkspaceName(g)
+			if ws != lastWorkspace {
+				lastWorkspace = ws
+				lines = append(lines, heading.Foreground(lipgloss.Color(workspaceColor(ws))).Render("Workspace "+ws))
+			}
+			line := fmt.Sprintf("  %s (%d)", g.Repo, len(g.Sessions))
+			if i == m.selectedWorkspace {
+				lines = append(lines, sel.Render(line))
+			} else {
+				lines = append(lines, norm.Render(line))
+			}
+		}
+	} else {
+		wsHeading := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(workspaceColor(view))).Render("Workspace " + view)
+		lines = append(lines, wsHeading, "")
+		for _, i := range m.repoIndexesForView() {
+			g := m.groups[i]
+			line := fmt.Sprintf("  %s (%d)", g.Repo, len(g.Sessions))
+			if i == m.selectedWorkspace {
+				lines = append(lines, sel.Render(line))
+			} else {
+				lines = append(lines, norm.Render(line))
+			}
 		}
 	}
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func (m model) currentWorkspaceName() string {
+	if len(m.groups) == 0 || m.selectedWorkspace < 0 || m.selectedWorkspace >= len(m.groups) {
+		return "root"
+	}
+	return groupWorkspaceName(m.groups[m.selectedWorkspace])
+}
+
+func (m model) workspaceViewName() string {
+	v := strings.TrimSpace(m.workspaceView)
+	if v == "" {
+		return workspaceAll
+	}
+	return v
+}
+
+func (m model) repoIndexesForView() []int {
+	view := m.workspaceViewName()
+	idxs := make([]int, 0, len(m.groups))
+	for i, g := range m.groups {
+		if view == workspaceAll || groupWorkspaceName(g) == view {
+			idxs = append(idxs, i)
+		}
+	}
+	return idxs
+}
+
+func (m model) workspaceOrder() []string {
+	order := []string{workspaceAll}
+	seen := map[string]bool{workspaceAll: true}
+	for _, g := range m.groups {
+		ws := groupWorkspaceName(g)
+		if !seen[ws] {
+			order = append(order, ws)
+			seen[ws] = true
+		}
+	}
+	return order
+}
+
+func (m *model) shiftWorkspaceView(direction int) bool {
+	if len(m.groups) == 0 {
+		return false
+	}
+	order := m.workspaceOrder()
+	if len(order) == 0 {
+		return false
+	}
+	curView := m.workspaceViewName()
+	curIdx := 0
+	for i, ws := range order {
+		if ws == curView {
+			curIdx = i
+			break
+		}
+	}
+	next := (curIdx + direction + len(order)) % len(order)
+	want := order[next]
+	m.workspaceView = want
+
+	if want == workspaceAll {
+		if m.selectedWorkspace < 0 || m.selectedWorkspace >= len(m.groups) {
+			m.selectedWorkspace = 0
+		}
+		return true
+	}
+
+	for i, g := range m.groups {
+		if groupWorkspaceName(g) == want {
+			m.selectedWorkspace = i
+			return true
+		}
+	}
+	return false
+}
+
+func groupWorkspaceName(g workspaceGroup) string {
+	ws := strings.TrimSpace(g.Workspace)
+	if ws == "" {
+		return "root"
+	}
+	return ws
 }
 
 func (m model) renderSessions(width int) string {
@@ -485,8 +917,11 @@ func (m model) renderSessions(width int) string {
 		lines = append(lines, "", "workdir: "+s.Workdir)
 	}
 
-	lines = append(lines, "", "Preview:")
-	previewLines := strings.Split(strings.TrimSpace(m.previewText), "\n")
+	previewRaw := m.previewText
+	if strings.TrimSpace(previewRaw) == "" {
+		previewRaw = "(select a session)"
+	}
+	previewLines := strings.Split(previewRaw, "\n")
 	if len(previewLines) == 1 && strings.TrimSpace(previewLines[0]) == "" {
 		previewLines = []string{"(select a session)"}
 	}
@@ -494,9 +929,15 @@ func (m model) renderSessions(width int) string {
 		previewLines = previewLines[:maxPreviewLines]
 		previewLines = append(previewLines, "...")
 	}
-	for _, pl := range previewLines {
-		lines = append(lines, "  "+pl)
+	for len(previewLines) < maxPreviewLines {
+		previewLines = append(previewLines, "")
 	}
+	previewBody := strings.Join(previewLines, "\n")
+	previewHeader := lipgloss.NewStyle().Foreground(lipgloss.Color("249")).Background(lipgloss.Color("236")).Padding(0, 1).Render("● ● ●  terminal preview")
+	previewPane := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1).Render(previewBody)
+	previewBox := lipgloss.JoinVertical(lipgloss.Left, previewHeader, previewPane)
+	previewTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("45")).Render("Preview")
+	lines = append(lines, "", previewTitle, previewBox)
 
 	return box.Render(strings.Join(lines, "\n"))
 }
@@ -517,11 +958,36 @@ func (m *model) restoreSelection() {
 		}
 	}
 
+	if m.activeWorkspace == "" && strings.TrimSpace(m.preferredWorkspace) != "" {
+		for i, g := range m.groups {
+			if g.Workspace == m.preferredWorkspace {
+				m.selectedWorkspace = i
+				break
+			}
+		}
+	}
+
+	if strings.TrimSpace(m.workspaceView) == "" {
+		m.workspaceView = workspaceAll
+		if strings.TrimSpace(m.preferredWorkspace) != "" {
+			m.workspaceView = m.preferredWorkspace
+		}
+	}
+
 	if m.selectedWorkspace < 0 {
 		m.selectedWorkspace = 0
 	}
 	if m.selectedWorkspace >= len(m.groups) {
 		m.selectedWorkspace = len(m.groups) - 1
+	}
+
+	if m.workspaceViewName() != workspaceAll && groupWorkspaceName(m.groups[m.selectedWorkspace]) != m.workspaceViewName() {
+		for i, g := range m.groups {
+			if groupWorkspaceName(g) == m.workspaceViewName() {
+				m.selectedWorkspace = i
+				break
+			}
+		}
 	}
 
 	cur := m.currentSessions()
@@ -555,6 +1021,14 @@ func (m *model) captureActive() {
 		m.activeSession = ""
 		return
 	}
+	ws := strings.TrimSpace(m.groups[m.selectedWorkspace].Workspace)
+	if ws == "" {
+		ws = "root"
+	}
+	if ws != m.preferredWorkspace {
+		m.preferredWorkspace = ws
+		_ = rememberWorkspaceTarget(remoteTarget(), ws)
+	}
 	m.activeWorkspace = m.groups[m.selectedWorkspace].Name
 	cur := m.currentSessions()
 	if len(cur) == 0 || m.selectedSession < 0 || m.selectedSession >= len(cur) {
@@ -586,19 +1060,107 @@ func loadCmd() tea.Cmd {
 	}
 }
 
-func newSessionCmd(path string) tea.Cmd {
+func newSessionCmd(path, repo, commandName, command string) tea.Cmd {
 	return func() tea.Msg {
-		name := "sh-" + time.Now().Format("150405")
+		name, err := buildSessionName(repo, commandName)
+		if err != nil {
+			return createdMsg{err: err}
+		}
 		args := []string{"new-session", "-d", "-s", name}
 		if strings.TrimSpace(path) != "" {
 			args = append(args, "-c", path)
 		}
-		_, err := runTmuxOut(args...)
+		_, err = runTmuxOut(args...)
 		if err != nil {
 			return createdMsg{err: err}
 		}
+		if strings.TrimSpace(command) != "" {
+			_, err = runTmuxOut("send-keys", "-t", name+":0.0", command, "C-m")
+			if err != nil {
+				return createdMsg{err: err}
+			}
+		}
 		return createdMsg{name: name, status: "Created " + name}
 	}
+}
+
+func defaultSessionTemplates() []sessionTemplate {
+	return []sessionTemplate{
+		{Label: "Shell (default)", Name: "shell", Command: ""},
+		{Label: "Claude (claude)", Name: "claude", Command: "claude"},
+		{Label: "Claude FULL (IS_SANDBOX=1 claude --dangerously-skip-permissions)", Name: "claude-full", Command: "IS_SANDBOX=1 claude --dangerously-skip-permissions"},
+		{Label: "OpenCode (opencode)", Name: "opencode", Command: "opencode"},
+		{Label: "Lazygit (lazygit)", Name: "lazygit", Command: "lazygit"},
+	}
+}
+
+func buildSessionName(repo, commandName string) (string, error) {
+	repoToken := sanitizeSessionToken(repo)
+	if repoToken == "" {
+		repoToken = "repo"
+	}
+	cmdToken := sanitizeSessionToken(commandName)
+	if cmdToken == "" {
+		cmdToken = "shell"
+	}
+	if len(repoToken) > 24 {
+		repoToken = repoToken[:24]
+	}
+	if len(cmdToken) > 12 {
+		cmdToken = cmdToken[:12]
+	}
+	prefix := repoToken + "-" + cmdToken + "-"
+	n, err := nextSessionNumber(prefix)
+	if err != nil {
+		return "", err
+	}
+	return prefix + fmt.Sprintf("%d", n), nil
+}
+
+func nextSessionNumber(prefix string) (int, error) {
+	metaOut, err := runTmuxOut("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "no server running") || strings.Contains(msg, "failed to connect") {
+			return 1, nil
+		}
+		return 0, err
+	}
+	maxNum := 0
+	for _, line := range strings.Split(strings.TrimSpace(metaOut), "\n") {
+		sn := strings.TrimSpace(line)
+		if !strings.HasPrefix(sn, prefix) {
+			continue
+		}
+		n := atoiSafe(strings.TrimPrefix(sn, prefix))
+		if n > maxNum {
+			maxNum = n
+		}
+	}
+	return maxNum + 1, nil
+}
+
+func sanitizeSessionToken(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	return out
 }
 
 func killSessionCmd(name string) tea.Cmd {
@@ -623,6 +1185,21 @@ func (m model) newSessionPath() string {
 	return "/"
 }
 
+func (m model) newSessionRepo() string {
+	if len(m.groups) > 0 && m.selectedWorkspace >= 0 && m.selectedWorkspace < len(m.groups) {
+		repo := strings.TrimSpace(m.groups[m.selectedWorkspace].Repo)
+		if repo != "" {
+			return repo
+		}
+	}
+	if sel, ok := m.selectedSessionInfo(); ok {
+		if p := strings.TrimSpace(sel.Workdir); p != "" {
+			return filepath.Base(p)
+		}
+	}
+	return "sh"
+}
+
 func previewCmdForSelection(m model) tea.Cmd {
 	sel, ok := m.selectedSessionInfo()
 	if !ok {
@@ -639,11 +1216,17 @@ func loadPreviewCmd(session string) tea.Cmd {
 }
 
 func capturePreview(session string) (string, error) {
-	out, err := runTmuxOut("capture-pane", "-e", "-p", "-S", "-60", "-t", session)
+	out, err := runTmuxOut("capture-pane", "-a", "-p", "-J", "-N", "-S", "-80", "-t", session)
 	if err != nil {
 		return "", err
 	}
-	return out, nil
+	return cleanPreview(out), nil
+}
+
+func cleanPreview(out string) string {
+	out = strings.ReplaceAll(out, "\r", "")
+	out = ansiRE.ReplaceAllString(out, "")
+	return strings.Trim(out, "\n")
 }
 
 func tickCmd() tea.Cmd {
@@ -657,6 +1240,14 @@ func attachCmd(session string) tea.Cmd {
 		}
 		return actionMsg{status: "Detached from " + session}
 	})
+}
+
+func attachSessionNow(session string) error {
+	cmd := tmuxAttachCmd(session)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func cycleRemoteCmd() tea.Cmd {
@@ -709,7 +1300,7 @@ func loadAllTargets() ([]string, error) {
 }
 
 func groupedSessions() ([]workspaceGroup, error) {
-	groups, err := discoverRepoGroups()
+	groups, err := discoverRepoGroupsCached()
 	if err != nil {
 		return nil, err
 	}
@@ -750,7 +1341,7 @@ func groupedSessions() ([]workspaceGroup, error) {
 	}
 
 	if len(groups) == 0 {
-		groups = []workspaceGroup{{Name: "root", Path: "/", Sessions: nil}}
+		groups = []workspaceGroup{{Workspace: "root", Repo: "root", Name: "root", Path: "/", Sessions: nil}}
 	}
 
 	for _, line := range strings.Split(metaOut, "\n") {
@@ -796,7 +1387,7 @@ func groupedSessions() ([]workspaceGroup, error) {
 
 func discoverRepoGroups() ([]workspaceGroup, error) {
 	const root = "/root/workspaces"
-	groups := []workspaceGroup{{Name: "root", Path: "/", Sessions: nil}}
+	groups := []workspaceGroup{{Workspace: "root", Repo: "root", Name: "root", Path: "/", Sessions: nil}}
 
 	workspaces, err := remoteListDirNames(root)
 	if err != nil {
@@ -810,9 +1401,11 @@ func discoverRepoGroups() ([]workspaceGroup, error) {
 		}
 		for _, repo := range repos {
 			groups = append(groups, workspaceGroup{
-				Name:     ws + "/" + repo,
-				Path:     filepath.Join(repoRoot, repo),
-				Sessions: nil,
+				Workspace: ws,
+				Repo:      repo,
+				Name:      ws + "/" + repo,
+				Path:      filepath.Join(repoRoot, repo),
+				Sessions:  nil,
 			})
 		}
 	}
@@ -821,6 +1414,40 @@ func discoverRepoGroups() ([]workspaceGroup, error) {
 		return groups[1+i].Name < groups[1+j].Name
 	})
 	return groups, nil
+}
+
+func discoverRepoGroupsCached() ([]workspaceGroup, error) {
+	target := remoteTarget()
+	if groups, ok := repoGroupCache[target]; ok {
+		out := make([]workspaceGroup, len(groups))
+		copy(out, groups)
+		for i := range out {
+			out[i].Sessions = nil
+		}
+		return out, nil
+	}
+
+	groups, err := discoverRepoGroups()
+	if err != nil {
+		return nil, err
+	}
+	copyGroups := make([]workspaceGroup, len(groups))
+	copy(copyGroups, groups)
+	repoGroupCache[target] = copyGroups
+
+	for i := range groups {
+		groups[i].Sessions = nil
+	}
+	return groups, nil
+}
+
+func workspaceColor(name string) string {
+	palette := []string{"81", "112", "178", "203", "75", "141", "214"}
+	h := 0
+	for _, r := range name {
+		h += int(r)
+	}
+	return palette[h%len(palette)]
 }
 
 func remoteListDirNames(path string) ([]string, error) {
@@ -843,7 +1470,7 @@ func remoteListDirNames(path string) ([]string, error) {
 	}
 
 	cmd := "root=" + shellQuote(path) + "; [ -d \"$root\" ] || exit 0; for d in \"$root\"/*; do [ -d \"$d\" ] || continue; basename \"$d\"; done"
-	out, err := runOut("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", remoteTarget(), "sh -lc "+shellQuote(cmd))
+	out, err := runSSHShOut(remoteTarget(), cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -942,7 +1569,7 @@ func runTmuxOut(args ...string) (string, error) {
 		return runOut("tmux", args...)
 	}
 	remoteCmd := "tmux " + shellJoin(args)
-	return runOut("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", remoteTarget(), "sh -lc "+shellQuote(remoteCmd))
+	return runSSHShOut(remoteTarget(), remoteCmd)
 }
 
 func tmuxAttachCmd(session string) *exec.Cmd {
@@ -950,7 +1577,38 @@ func tmuxAttachCmd(session string) *exec.Cmd {
 		return exec.Command("tmux", "attach-session", "-t", session)
 	}
 	remoteCmd := "tmux attach-session -t " + shellQuote(session)
-	return exec.Command("ssh", "-t", remoteTarget(), "sh -lc "+shellQuote(remoteCmd))
+	args := append(sshAttachArgs(remoteTarget()), "sh -lc "+shellQuote(remoteCmd))
+	return exec.Command("ssh", args...)
+}
+
+func sshControlPath() string {
+	return filepath.Join(os.TempDir(), "echoshell-ssh-%C")
+}
+
+func sshBaseArgs(target string) []string {
+	return []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=8",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPersist=120",
+		"-o", "ControlPath=" + sshControlPath(),
+		target,
+	}
+}
+
+func sshAttachArgs(target string) []string {
+	return []string{
+		"-t",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPersist=120",
+		"-o", "ControlPath=" + sshControlPath(),
+		target,
+	}
+}
+
+func runSSHShOut(target, command string) (string, error) {
+	args := append(sshBaseArgs(target), "sh -lc "+shellQuote(command))
+	return runOut("ssh", args...)
 }
 
 func resolveRemoteTarget() string {
@@ -1017,6 +1675,82 @@ func rememberRemoteTarget(target string) error {
 		next = next[:20]
 	}
 	return os.WriteFile(path, []byte(strings.Join(next, "\n")+"\n"), 0o644)
+}
+
+func workspacesPath() (string, error) {
+	d, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "echoshell", "workspaces.txt"), nil
+}
+
+func normalizeTarget(target string) string {
+	v := strings.TrimSpace(target)
+	if v == "" {
+		return defaultRemoteTarget
+	}
+	if strings.EqualFold(v, "localhost") || strings.EqualFold(v, "root@localhost") {
+		return "local"
+	}
+	return v
+}
+
+func loadLastWorkspaceTarget(target string) (string, error) {
+	target = normalizeTarget(target)
+	path, err := workspacesPath()
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, ln := range strings.Split(string(raw), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(ln), "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if normalizeTarget(parts[0]) == target {
+			return strings.TrimSpace(parts[1]), nil
+		}
+	}
+	return "", nil
+}
+
+func rememberWorkspaceTarget(target, workspace string) error {
+	target = normalizeTarget(target)
+	workspace = strings.TrimSpace(workspace)
+	if target == "" || workspace == "" {
+		return nil
+	}
+	path, err := workspacesPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	rows := []string{target + "|" + workspace}
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		for _, ln := range strings.Split(string(raw), "\n") {
+			parts := strings.SplitN(strings.TrimSpace(ln), "|", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			t := normalizeTarget(parts[0])
+			w := strings.TrimSpace(parts[1])
+			if t == "" || w == "" || t == target {
+				continue
+			}
+			rows = append(rows, t+"|"+w)
+		}
+	}
+	if len(rows) > 20 {
+		rows = rows[:20]
+	}
+	return os.WriteFile(path, []byte(strings.Join(rows, "\n")+"\n"), 0o644)
 }
 
 func shellJoin(args []string) string {
