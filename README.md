@@ -52,9 +52,9 @@ Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
 **Session Management:**
 - `Tab`: next repo
 - `Shift+Tab`: previous repo
-- `1..4`: repo quick select
-- `j/k` or `up/down`: repo up/down
-- `h/l` or `left/right`: session selection
+- `h/l` or `left/right`: prev/next repo
+- `1..9`: repo quick select
+- `j/k` or `up/down`: session selection
 - `n`: pick command and create new session
 - `d`: destroy selected session
 - `u`: update from `origin/main` and rebuild locally

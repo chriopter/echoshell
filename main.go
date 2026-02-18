@@ -537,6 +537,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "left", "h":
+			if m.shiftRepo(-1) {
+				return m, previewCmdForSelection(m)
+			}
+			return m, nil
+		case "right", "l":
+			if m.shiftRepo(1) {
+				return m, previewCmdForSelection(m)
+			}
+			return m, nil
+		case "up", "k":
 			cur := m.currentSessions()
 			if len(cur) == 0 {
 				return m, nil
@@ -547,7 +557,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
-		case "right", "l":
+		case "down", "j":
 			cur := m.currentSessions()
 			if len(cur) == 0 {
 				return m, nil
@@ -555,16 +565,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selectedSession < len(cur)-1 {
 				m.selectedSession++
 				m.captureActive()
-				return m, previewCmdForSelection(m)
-			}
-			return m, nil
-		case "up", "k":
-			if m.shiftRepo(-1) {
-				return m, previewCmdForSelection(m)
-			}
-			return m, nil
-		case "down", "j":
-			if m.shiftRepo(1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
@@ -605,7 +605,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = "Attaching " + sel.Name + "..."
 			return m, attachCmd(sel.Name)
-		case "1", "2", "3", "4":
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			s := strings.ToLower(msg.String())
 			idx := int(s[0] - '1')
 			repos := m.repoOrder()
@@ -706,7 +706,7 @@ func (m model) View() string {
 	}
 
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab/s-tab repo  1-4 repo  j/k repo  h/l session  enter attach")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab/s-tab repo  h/l repo  1-9 repo  up/down session  enter attach")
 	helpActions := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("n new  d destroy  t target  r refresh  u update  q quit")
 	help := lipgloss.JoinVertical(lipgloss.Left, helpNav, helpActions)
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
@@ -718,7 +718,7 @@ func (m model) View() string {
 
 	leftW := 30
 	if m.width > 0 {
-		leftW = max(34, min(52, m.width/4))
+		leftW = max(34, min(60, m.width/3))
 	}
 	rightW := max(50, m.width-leftW-6)
 
@@ -752,7 +752,7 @@ func (m model) renderWorkspaces(width, height int) string {
 	workspaces := m.workspaceList()
 	for wi, ws := range workspaces {
 		total := m.workspaceTotalSessions(ws)
-		header := fmt.Sprintf("%s (%d)", ws, total)
+		header := fmt.Sprintf("== %s == (%d)", ws, total)
 		headerStyled := wsNorm.Foreground(lipgloss.Color(workspaceColor(ws))).Render(header)
 		if ws == activeWS {
 			headerStyled = wsSel.Render(headerStyled)
@@ -761,7 +761,7 @@ func (m model) renderWorkspaces(width, height int) string {
 
 		for _, i := range m.repoIndexesForWorkspace(ws) {
 			g := m.groups[i]
-			repoLine := fmt.Sprintf("  - %s (%d)", g.Repo, len(g.Sessions))
+			repoLine := fmt.Sprintf(" %s (%d)", g.Repo, len(g.Sessions))
 			if i == m.selectedWorkspace {
 				lines = append(lines, repoSel.Render(repoLine))
 			} else {
@@ -773,7 +773,7 @@ func (m model) renderWorkspaces(width, height int) string {
 					att = "*"
 				}
 				name := trimRepoPrefix(g.Repo, s.Name)
-				sLine := fmt.Sprintf("    %s %s", att, name)
+				sLine := fmt.Sprintf("   %s %s", att, name)
 				if i == m.selectedWorkspace && si == m.selectedSession {
 					lines = append(lines, repoSel.Render(sLine))
 				} else {
@@ -910,32 +910,25 @@ func groupWorkspaceName(g workspaceGroup) string {
 func (m model) renderSessions(width int) string {
 	box := lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
 	g := m.groups[m.selectedWorkspace]
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render("Sessions: " + g.Name)
-	sel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
-	norm := lipgloss.NewStyle().Padding(0, 1)
+	sel, ok := m.selectedSessionInfo()
+	sessionTitle := "Preview"
+	if ok {
+		sessionTitle = "Preview: " + g.Name + " / " + trimRepoPrefix(g.Repo, sel.Name)
+	}
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(sessionTitle)
 
 	lines := []string{title, ""}
-	if len(g.Sessions) == 0 {
+	if !ok {
 		lines = append(lines, "(no sessions)")
 		return box.Render(strings.Join(lines, "\n"))
 	}
 
-	for i, s := range g.Sessions {
-		att := " "
-		if s.Attached {
-			att = "*"
-		}
-		line := fmt.Sprintf("%s %s  win:%d", att, s.Name, s.Windows)
-		if i == m.selectedSession {
-			lines = append(lines, sel.Render(line))
-		} else {
-			lines = append(lines, norm.Render(line))
-		}
+	att := "no"
+	if sel.Attached {
+		att = "yes"
 	}
-
-	if s, ok := m.selectedSessionInfo(); ok {
-		lines = append(lines, "", "workdir: "+s.Workdir)
-	}
+	lines = append(lines, "workdir: "+sel.Workdir)
+	lines = append(lines, fmt.Sprintf("windows: %d  attached: %s", sel.Windows, att))
 
 	previewRaw := m.previewText
 	if strings.TrimSpace(previewRaw) == "" {
