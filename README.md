@@ -50,16 +50,15 @@ Passing search terms (for example `v l`) does quick fuzzy matching against exist
 Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
 
 **Session Management:**
-- `Tab`: next repo
-- `Shift+Tab`: previous repo
-- `h/l` or `left/right`: prev/next repo
-- `1..9`: repo quick select
-- `j/k` or `up/down`: session selection
-- `n`: pick command and create new session
-- `d`: destroy selected session
-- `u`: update from `origin/main` and rebuild locally
-- `t`: switch remote target
-- `Enter`: attach
+- `1..9`: select repo
+- `Tab` / `Shift+Tab`: next/prev repo
+- `Left/Right`: prev/next repo
+- `Up/Down`: session selection (wraps across repos)
+- `0`: command menu (refresh/update/quit/etc)
+- `o`: spawn `opencode` in selected repo
+- `l`: spawn `lazygit` in selected repo
+- `c`: spawn claude FULL in selected repo
+- `b`: spawn bash shell in selected repo
 - `r`: refresh
 - `q` or `Esc`: quit
 
