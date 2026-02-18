@@ -14,6 +14,20 @@ KISS tmux picker.
 go build -o echoshell .
 ```
 
+## Install (recommended)
+
+Build in the repo, then put a symlink on your PATH so `echoshell` always runs the repo-built binary:
+
+```bash
+go build -o echoshell .
+mkdir -p ~/.local/bin
+ln -sf "$(pwd)/echoshell" ~/.local/bin/echoshell
+```
+
+If `~/.local/bin` is not on your PATH, add it in your shell config.
+
+The `u` (update) action will work with this setup because it rebuilds in the git repo and the symlink keeps pointing at the updated binary.
+
 ## Run
 ```bash
 ./echoshell
@@ -36,10 +50,11 @@ Passing search terms (for example `v l`) does quick fuzzy matching against exist
 Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
 
 **Session Management:**
-- `Tab`: next workspace view (`all` included)
-- `Shift+Tab`: previous workspace view
-- `1..4`: session quick select
-- `j/k` or `up/down`: repo up/down in current workspace view
+- `Tab`: next workspace
+- `Shift+Tab`: previous workspace
+- `1..4`: workspace quick select
+- `j/k` or `up/down`: repo up/down in active workspace
+- `h/l` or `left/right`: session selection
 - `n`: pick command and create new session
 - `d`: destroy selected session
 - `u`: update from `origin/main` and rebuild locally
