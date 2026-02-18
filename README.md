@@ -50,10 +50,10 @@ Passing search terms (for example `v l`) does quick fuzzy matching against exist
 Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
 
 **Session Management:**
-- `Tab`: next workspace
-- `Shift+Tab`: previous workspace
-- `1..4`: workspace quick select
-- `j/k` or `up/down`: repo up/down in active workspace
+- `Tab`: next repo
+- `Shift+Tab`: previous repo
+- `1..4`: repo quick select
+- `j/k` or `up/down`: repo up/down
 - `h/l` or `left/right`: session selection
 - `n`: pick command and create new session
 - `d`: destroy selected session

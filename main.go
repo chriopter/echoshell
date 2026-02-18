@@ -527,12 +527,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "tab":
-			if m.shiftWorkspace(1) {
+			if m.shiftRepo(1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "shift+tab":
-			if m.shiftWorkspace(-1) {
+			if m.shiftRepo(-1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
@@ -559,34 +559,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up", "k":
-			repos := m.repoIndexesForWorkspace(m.currentWorkspaceName())
-			cur := -1
-			for i, idx := range repos {
-				if idx == m.selectedWorkspace {
-					cur = i
-					break
-				}
-			}
-			if cur > 0 {
-				m.selectedWorkspace = repos[cur-1]
-				m.selectedSession = 0
-				m.captureActive()
+			if m.shiftRepo(-1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "down", "j":
-			repos := m.repoIndexesForWorkspace(m.currentWorkspaceName())
-			cur := -1
-			for i, idx := range repos {
-				if idx == m.selectedWorkspace {
-					cur = i
-					break
-				}
-			}
-			if cur >= 0 && cur < len(repos)-1 {
-				m.selectedWorkspace = repos[cur+1]
-				m.selectedSession = 0
-				m.captureActive()
+			if m.shiftRepo(1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
@@ -630,11 +608,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "1", "2", "3", "4":
 			s := strings.ToLower(msg.String())
 			idx := int(s[0] - '1')
-			workspaces := m.workspaceList()
-			if idx >= 0 && idx < len(workspaces) {
-				if m.selectWorkspaceByName(workspaces[idx]) {
-					return m, previewCmdForSelection(m)
-				}
+			repos := m.repoOrder()
+			if idx >= 0 && idx < len(repos) {
+				m.selectedWorkspace = repos[idx]
+				m.selectedSession = 0
+				m.captureActive()
+				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		}
@@ -727,7 +706,7 @@ func (m model) View() string {
 	}
 
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab/s-tab workspace  1-4 workspace  j/k repo  h/l session  enter attach")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("tab/s-tab repo  1-4 repo  j/k repo  h/l session  enter attach")
 	helpActions := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("n new  d destroy  t target  r refresh  u update  q quit")
 	help := lipgloss.JoinVertical(lipgloss.Left, helpNav, helpActions)
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
@@ -739,19 +718,28 @@ func (m model) View() string {
 
 	leftW := 30
 	if m.width > 0 {
-		leftW = max(24, min(36, m.width/4))
+		leftW = max(34, min(52, m.width/4))
 	}
 	rightW := max(50, m.width-leftW-6)
 
-	left := m.renderWorkspaces(leftW)
+	bodyH := 0
+	// Layout is: title (1) + remote (1) + body + status (1) + help (2)
+	if m.height > 0 {
+		bodyH = max(8, m.height-5)
+	}
+
+	left := m.renderWorkspaces(leftW, bodyH)
 	right := m.renderSessions(rightW)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, remote, body, status, help)
 }
 
-func (m model) renderWorkspaces(width int) string {
-	box := lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+func (m model) renderWorkspaces(width, height int) string {
+	box := lipgloss.NewStyle().Width(width).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(1, 2)
+	if height > 0 {
+		box = box.Height(height)
+	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Workspaces")
 
 	wsSel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
@@ -761,31 +749,69 @@ func (m model) renderWorkspaces(width int) string {
 
 	lines := []string{title, ""}
 	activeWS := m.currentWorkspaceName()
-	for _, ws := range m.workspaceList() {
+	workspaces := m.workspaceList()
+	for wi, ws := range workspaces {
 		total := m.workspaceTotalSessions(ws)
-		header := fmt.Sprintf("Workspace %s (%d)", ws, total)
+		header := fmt.Sprintf("%s (%d)", ws, total)
 		headerStyled := wsNorm.Foreground(lipgloss.Color(workspaceColor(ws))).Render(header)
 		if ws == activeWS {
 			headerStyled = wsSel.Render(headerStyled)
 		}
 		lines = append(lines, headerStyled)
 
-		if ws != activeWS {
-			continue
-		}
-
 		for _, i := range m.repoIndexesForWorkspace(ws) {
 			g := m.groups[i]
-			line := fmt.Sprintf("  %s (%d)", g.Repo, len(g.Sessions))
+			repoLine := fmt.Sprintf("  - %s (%d)", g.Repo, len(g.Sessions))
 			if i == m.selectedWorkspace {
-				lines = append(lines, repoSel.Render(line))
+				lines = append(lines, repoSel.Render(repoLine))
 			} else {
-				lines = append(lines, repoNorm.Render(line))
+				lines = append(lines, repoNorm.Render(repoLine))
+			}
+			for si, s := range g.Sessions {
+				att := " "
+				if s.Attached {
+					att = "*"
+				}
+				name := trimRepoPrefix(g.Repo, s.Name)
+				sLine := fmt.Sprintf("    %s %s", att, name)
+				if i == m.selectedWorkspace && si == m.selectedSession {
+					lines = append(lines, repoSel.Render(sLine))
+				} else {
+					lines = append(lines, repoNorm.Render(sLine))
+				}
+			}
+		}
+		if wi != len(workspaces)-1 {
+			lines = append(lines, "")
+		}
+	}
+
+	if height > 0 {
+		// Account for border + padding (top/bottom): 2 + 2
+		maxLines := max(1, height-4)
+		if len(lines) > maxLines {
+			if maxLines == 1 {
+				lines = []string{"..."}
+			} else {
+				lines = append(lines[:maxLines-1], "...")
 			}
 		}
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+func trimRepoPrefix(repo, session string) string {
+	r := strings.TrimSpace(repo)
+	s := strings.TrimSpace(session)
+	if r == "" || s == "" {
+		return session
+	}
+	prefix := r + "-"
+	if strings.HasPrefix(s, prefix) && len(s) > len(prefix) {
+		return s[len(prefix):]
+	}
+	return session
 }
 
 func (m model) currentWorkspaceName() string {
@@ -843,40 +869,34 @@ func (m model) repoIndexesForWorkspace(workspace string) []int {
 	return idxs
 }
 
-func (m *model) selectWorkspaceByName(workspace string) bool {
-	ws := strings.TrimSpace(workspace)
-	if ws == "" {
-		ws = "root"
+func (m model) repoOrder() []int {
+	if len(m.groups) == 0 {
+		return nil
 	}
-	for i, g := range m.groups {
-		if groupWorkspaceName(g) == ws {
-			m.selectedWorkspace = i
-			m.selectedSession = 0
-			m.captureActive()
-			return true
-		}
+	out := make([]int, 0, len(m.groups))
+	for _, ws := range m.workspaceList() {
+		out = append(out, m.repoIndexesForWorkspace(ws)...)
 	}
-	return false
+	return out
 }
 
-func (m *model) shiftWorkspace(direction int) bool {
-	if len(m.groups) == 0 {
+func (m *model) shiftRepo(direction int) bool {
+	order := m.repoOrder()
+	if len(order) == 0 {
 		return false
 	}
-	workspaces := m.workspaceList()
-	if len(workspaces) == 0 {
-		return false
-	}
-	cur := m.currentWorkspaceName()
-	curIdx := 0
-	for i, ws := range workspaces {
-		if ws == cur {
-			curIdx = i
+	curPos := 0
+	for i, idx := range order {
+		if idx == m.selectedWorkspace {
+			curPos = i
 			break
 		}
 	}
-	idx := (curIdx + direction + len(workspaces)) % len(workspaces)
-	return m.selectWorkspaceByName(workspaces[idx])
+	next := (curPos + direction + len(order)) % len(order)
+	m.selectedWorkspace = order[next]
+	m.selectedSession = 0
+	m.captureActive()
+	return true
 }
 
 func groupWorkspaceName(g workspaceGroup) string {
