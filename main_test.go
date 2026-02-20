@@ -51,7 +51,7 @@ func TestAttachableSessionFallsBackToFirstWorkspaceWithSessions(t *testing.T) {
 	}
 }
 
-func TestRestoreSelectionMovesOffEmptyWorkspace(t *testing.T) {
+func TestRestoreSelectionKeepsEmptyWorkspaceRow(t *testing.T) {
 	m := model{
 		groups: []workspaceGroup{
 			{Workspace: "root", Name: "root", Repo: "root", Sessions: nil},
@@ -59,15 +59,36 @@ func TestRestoreSelectionMovesOffEmptyWorkspace(t *testing.T) {
 		},
 		selectedWorkspace: 0,
 		selectedSession:   -1,
+		activeWorkspace:   "root",
 	}
 
 	m.restoreSelection()
 
-	if m.selectedWorkspace != 1 {
-		t.Fatalf("expected selectedWorkspace to move to 1, got %d", m.selectedWorkspace)
+	if m.selectedWorkspace != 0 {
+		t.Fatalf("expected selectedWorkspace to stay on 0, got %d", m.selectedWorkspace)
 	}
-	if m.selectedSession != 0 {
-		t.Fatalf("expected selectedSession to be 0, got %d", m.selectedSession)
+	if m.selectedSession != -1 {
+		t.Fatalf("expected selectedSession to stay on repo row (-1), got %d", m.selectedSession)
+	}
+}
+
+func TestRestoreSelectionKeepsRepoRowOnWorkspaceWithSessions(t *testing.T) {
+	m := model{
+		groups: []workspaceGroup{
+			{Workspace: "git", Name: "git/app", Repo: "app", Sessions: []sessionInfo{{Name: "app-shell-1"}, {Name: "app-shell-2"}}},
+		},
+		selectedWorkspace: 0,
+		selectedSession:   -1,
+		activeWorkspace:   "git/app",
+	}
+
+	m.restoreSelection()
+
+	if m.selectedWorkspace != 0 {
+		t.Fatalf("expected selectedWorkspace to stay on 0, got %d", m.selectedWorkspace)
+	}
+	if m.selectedSession != -1 {
+		t.Fatalf("expected selectedSession to stay on repo row (-1), got %d", m.selectedSession)
 	}
 }
 
@@ -111,5 +132,27 @@ func TestSoftAttachPaneCommandUsesReadOnlyAttach(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "-r") {
 		t.Fatalf("preview command should be read-only: %q", cmd)
+	}
+}
+
+func TestScoreSessionMatchTwoArgsUseRepoThenSession(t *testing.T) {
+	g := workspaceGroup{Workspace: "git", Repo: "opasdf", Name: "git/opasdf"}
+	lazy := sessionInfo{Name: "opasdf-lazygit-1", Workdir: "/root/git/opasdf"}
+	shell := sessionInfo{Name: "opasdf-shell-1", Workdir: "/root/git/opasdf"}
+
+	if _, ok := scoreSessionMatch([]string{"op", "la"}, g, lazy); !ok {
+		t.Fatalf("expected lazygit session to match repo+session query")
+	}
+	if _, ok := scoreSessionMatch([]string{"op", "la"}, g, shell); ok {
+		t.Fatalf("did not expect shell session to match session query 'la'")
+	}
+}
+
+func TestScoreSessionMatchTwoArgsRequireRepoMatch(t *testing.T) {
+	g := workspaceGroup{Workspace: "git", Repo: "tools", Name: "git/tools"}
+	s := sessionInfo{Name: "tools-lazygit-1", Workdir: "/root/git/tools"}
+
+	if _, ok := scoreSessionMatch([]string{"op", "la"}, g, s); ok {
+		t.Fatalf("did not expect repo mismatch to match query")
 	}
 }

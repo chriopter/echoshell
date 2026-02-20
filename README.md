@@ -45,6 +45,8 @@ You do not need to run tmux manually in the command. `echoshell` auto-starts ins
 - `r`: refresh
 - `q` / `Esc`: quit
 
-Search args (for example `echoshell v l`) do quick fuzzy attach.
+Search args are fuzzy:
+- 1 arg: match across repo/session/workspace
+- 2+ args: first arg matches repo, remaining args match session name (for example `echoshell op la`)
 
 Safety: the tmux session currently running `echoshell` is hidden from the picker and cannot be destroyed from inside `echoshell`.

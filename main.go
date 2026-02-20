@@ -271,31 +271,93 @@ func findQuickCandidates(tokens []string) ([]quickCandidate, error) {
 }
 
 func scoreSessionMatch(tokens []string, g workspaceGroup, s sessionInfo) (int, bool) {
-	t := normalizeForMatch(strings.Join(tokens, " "))
-	if t == "" {
+	cleaned := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		if tok != "" {
+			cleaned = append(cleaned, tok)
+		}
+	}
+	if len(cleaned) == 0 {
 		return 0, false
 	}
-	parts := strings.Fields(t)
-	if len(parts) == 0 {
-		return 0, false
+
+	if len(cleaned) >= 2 {
+		repoQuery := cleaned[0]
+		sessionQuery := strings.Join(cleaned[1:], " ")
+
+		repoHay := normalizeForMatch(strings.Join([]string{g.Repo, g.Name, g.Workspace}, " "))
+		sessionName := trimRepoPrefix(g.Repo, s.Name)
+		sessionHay := normalizeForMatch(strings.Join([]string{s.Name, sessionName}, " "))
+
+		repoScore, ok := scoreMatchAgainstHay(repoQuery, repoHay, true)
+		if !ok {
+			return 0, false
+		}
+		sessionScore, ok := scoreMatchAgainstHay(sessionQuery, sessionHay, false)
+		if !ok {
+			return 0, false
+		}
+
+		score := repoScore*3 + sessionScore*4
+		if hasWordPrefix(normalizeForMatch(g.Repo), normalizeForMatch(repoQuery)) {
+			score += 10
+		}
+		if hasWordPrefix(normalizeForMatch(sessionName), normalizeForMatch(sessionQuery)) {
+			score += 10
+		}
+		return score, true
 	}
+
 	hay := normalizeForMatch(strings.Join([]string{s.Name, g.Name, g.Workspace, g.Repo, s.Workdir}, " "))
-	score := 0
-	for _, p := range parts {
-		if strings.Contains(hay, p) {
-			score += 10 + len(p)
-			continue
-		}
-		if subseq(hay, p) {
-			score += 4 + len(p)
-			continue
-		}
+	score, ok := scoreMatchAgainstHay(cleaned[0], hay, true)
+	if !ok {
 		return 0, false
 	}
 	if strings.Contains(hay, normalizeForMatch(s.Name)) {
 		score += 3
 	}
 	return score, true
+}
+
+func scoreMatchAgainstHay(query, hay string, allowSubseq bool) (int, bool) {
+	q := normalizeForMatch(query)
+	h := normalizeForMatch(hay)
+	if q == "" || h == "" {
+		return 0, false
+	}
+	parts := strings.Fields(q)
+	if len(parts) == 0 {
+		return 0, false
+	}
+	score := 0
+	for _, p := range parts {
+		if strings.Contains(h, p) {
+			score += 10 + len(p)
+			continue
+		}
+		if allowSubseq && subseq(h, p) {
+			score += 4 + len(p)
+			continue
+		}
+		return 0, false
+	}
+	return score, true
+}
+
+func hasWordPrefix(hay, query string) bool {
+	hayParts := strings.Fields(normalizeForMatch(hay))
+	queryParts := strings.Fields(normalizeForMatch(query))
+	if len(hayParts) == 0 || len(queryParts) == 0 {
+		return false
+	}
+	prefix := queryParts[0]
+	for _, hp := range hayParts {
+		if strings.HasPrefix(hp, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeForMatch(s string) string {
@@ -1265,11 +1327,12 @@ func (m *model) restoreSelection() {
 
 	cur := m.currentSessions()
 	if len(cur) == 0 {
-		if m.selectFirstWorkspaceWithSessions() {
-			m.captureActive()
-			return
-		}
 		m.selectedSession = -1
+		m.captureActive()
+		return
+	}
+
+	if m.activeSession == "" && m.selectedSession == -1 {
 		m.captureActive()
 		return
 	}
