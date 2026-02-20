@@ -122,6 +122,36 @@ func TestTmuxAttachCmdUsesAttachOutsideTmux(t *testing.T) {
 	}
 }
 
+func TestDesiredTmuxMouseModeDefaultsOn(t *testing.T) {
+	t.Setenv("ECHOSHELL_TMUX_MOUSE", "")
+	mode, manage := desiredTmuxMouseMode()
+	if !manage {
+		t.Fatalf("expected mouse mode to be managed by default")
+	}
+	if mode != "on" {
+		t.Fatalf("expected default mouse mode 'on', got %q", mode)
+	}
+}
+
+func TestDesiredTmuxMouseModeOff(t *testing.T) {
+	t.Setenv("ECHOSHELL_TMUX_MOUSE", "off")
+	mode, manage := desiredTmuxMouseMode()
+	if !manage {
+		t.Fatalf("expected mouse mode to be managed for explicit off")
+	}
+	if mode != "off" {
+		t.Fatalf("expected mouse mode 'off', got %q", mode)
+	}
+}
+
+func TestDesiredTmuxMouseModeKeep(t *testing.T) {
+	t.Setenv("ECHOSHELL_TMUX_MOUSE", "keep")
+	mode, manage := desiredTmuxMouseMode()
+	if manage {
+		t.Fatalf("expected keep mode to skip managing mouse, got %q", mode)
+	}
+}
+
 func TestSoftAttachPaneCommandUsesReadOnlyAttach(t *testing.T) {
 	cmd := softAttachPaneCommand("my-session")
 	if !strings.Contains(cmd, "TMUX=") {

@@ -154,6 +154,8 @@ func run() error {
 		return err
 	}
 
+	ensureTmuxMouseMode()
+
 	selectedRemoteTarget = defaultRemoteTarget
 
 	updateRepoDir = detectRepoDir()
@@ -2196,6 +2198,34 @@ func isLocalRemote() bool {
 
 func runTmuxOut(args ...string) (string, error) {
 	return runOut("tmux", args...)
+}
+
+func ensureTmuxMouseMode() {
+	desired, manage := desiredTmuxMouseMode()
+	if !manage {
+		return
+	}
+
+	current, err := runTmuxOut("show-options", "-gqv", "mouse")
+	if err == nil && strings.EqualFold(strings.TrimSpace(current), desired) {
+		return
+	}
+
+	_, _ = runTmuxOut("set-option", "-g", "mouse", desired)
+}
+
+func desiredTmuxMouseMode() (string, bool) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("ECHOSHELL_TMUX_MOUSE")))
+	switch v {
+	case "", "1", "on", "true", "yes":
+		return "on", true
+	case "0", "off", "false", "no":
+		return "off", true
+	case "keep", "auto":
+		return "", false
+	default:
+		return "on", true
+	}
 }
 
 func tmuxAttachCmd(session string) *exec.Cmd {

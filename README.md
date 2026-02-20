@@ -29,6 +29,10 @@ mosh root@your-server -- echoshell
 
 You do not need to run tmux manually in the command. `echoshell` auto-starts inside tmux when needed.
 
+`echoshell` sets `tmux` mouse mode to `on` by default so wheel scrolling works in TUI apps
+like `opencode` and `claude`. Override with `ECHOSHELL_TMUX_MOUSE=off` or leave existing
+tmux behavior untouched with `ECHOSHELL_TMUX_MOUSE=keep`.
+
 ## Keys
 - `1..9`: select repo
 - `Tab` / `Shift+Tab`: next/prev repo
