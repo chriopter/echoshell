@@ -3,11 +3,10 @@
 KISS tmux picker.
 
 - Lists tmux sessions
-- Shows repo entries from `/root/workspaces/*/data/repos/*`
+- Shows repo entries from `~/git/*`
 - Includes `root` entry (new sessions there start in `/`)
 - Attaches fast from a small TUI
-- Auto-connects to last target (optional target picker)
-- Reuses SSH control connections across echoshell instances for faster remote loads
+- Runs local-only inside tmux (KISS)
 
 ## Build
 ```bash
@@ -31,8 +30,16 @@ The `u` (update) action will work with this setup because it rebuilds in the git
 ## Run
 ```bash
 ./echoshell
-ECHOSHELL_REMOTE=root@your-server ./echoshell
 ./echoshell v l
+```
+
+## Recommended remote usage (mosh)
+
+Run echoshell directly on the remote host inside tmux:
+
+```bash
+mosh root@your-server -- tmux new -As main
+echoshell
 ```
 
 Passing search terms (for example `v l`) does quick fuzzy matching against existing session names/workspace/repo:
@@ -41,19 +48,12 @@ Passing search terms (for example `v l`) does quick fuzzy matching against exist
 
 ## Keys
 
-**Remote Selection (on startup):**
-- `j/k` or `up/down`: navigate targets
-- `Enter`: select target (or "+ Add new remote..." to add a new one)
-- When adding new: type `user@host`, press `Enter` to confirm, `Esc` to cancel
-- `q` or `Esc`: quit
-
-Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
-
 **Session Management:**
 - `1..9`: select repo
 - `Tab` / `Shift+Tab`: next/prev repo
 - `Left/Right`: prev/next repo
-- `Up/Down`: session selection (wraps across repos)
+- `Up/Down`: move vertically through repos and sessions
+- `Enter`: full attach to selected session
 - `0`: command menu (refresh/update/quit/etc)
 - `o`: spawn `opencode` in selected repo
 - `l`: spawn `lazygit` in selected repo
@@ -62,10 +62,12 @@ Set `ECHOSHELL_SELECT_REMOTE=1` to always show this picker on startup.
 - `r`: refresh
 - `q` or `Esc`: quit
 
+When running inside tmux, moving selection updates a soft-attach preview in a right split pane.
+
 `n` command picker options:
 - `Shell (default)`
 - `Claude (claude)`
-- `Claude FULL (IS_SANDBOX=1 claude --dangerously-skip-permissions)`
+- `Claude FULL (sandbox off)`
 - `OpenCode (opencode)`
 - `Lazygit (lazygit)`
 
@@ -74,5 +76,4 @@ New session names use `repo-command-number` (example: `valiido-lazygit-1`).
 Session preview updates as you move selection.
 After `n`, new session becomes selected and previewed.
 
-Last target is stored in `~/.config/echoshell/targets.txt`.
-Last workspace per target is stored in `~/.config/echoshell/workspaces.txt`.
+Last repo group selection is stored in `~/.config/echoshell/workspaces.txt`.

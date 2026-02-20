@@ -71,6 +71,12 @@ type previewMsg struct {
 	err     error
 }
 
+type softAttachMsg struct {
+	pane    string
+	session string
+	err     error
+}
+
 type remoteMsg struct {
 	target string
 	err    error
@@ -110,6 +116,7 @@ type model struct {
 	activeSession      string
 	previewSession     string
 	previewText        string
+	previewPane        string
 	updateBusy         bool
 	status             string
 	selectingRemote    bool
@@ -134,14 +141,14 @@ func main() {
 }
 
 func run() error {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		return errors.New("ssh is required")
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return errors.New("tmux is required")
+	}
+	if started, err := bootstrapIntoTmuxIfNeeded(); started {
+		return err
 	}
 
-	lastTarget := resolveRemoteTarget()
-	selectedRemoteTarget = strings.TrimSpace(lastTarget)
-
-	targets, selectedIdx := loadTargetsForSelection(lastTarget)
+	selectedRemoteTarget = defaultRemoteTarget
 
 	updateRepoDir = detectRepoDir()
 	preferredWorkspace, _ := loadLastWorkspaceTarget(selectedRemoteTarget)
@@ -149,22 +156,11 @@ func run() error {
 	m := model{
 		status:             "Loading sessions...",
 		selectingRemote:    false,
-		availableTargets:   targets,
-		selectedTarget:     selectedIdx,
+		availableTargets:   []string{"local"},
+		selectedTarget:     0,
 		preferredWorkspace: preferredWorkspace,
 		newTemplates:       defaultSessionTemplates(),
 		multiSelected:      map[string]bool{},
-	}
-
-	if os.Getenv("ECHOSHELL_SELECT_REMOTE") == "1" {
-		m.selectingRemote = true
-		m.status = "Select remote target..."
-	}
-
-	if isLocalRemote() {
-		if _, err := exec.LookPath("tmux"); err != nil {
-			return errors.New("tmux is required for local mode")
-		}
 	}
 
 	if len(os.Args) > 1 {
@@ -184,6 +180,37 @@ func run() error {
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+func bootstrapIntoTmuxIfNeeded() (bool, error) {
+	if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+		return false, nil
+	}
+	if strings.TrimSpace(os.Getenv("ECHOSHELL_IN_TMUX")) == "1" {
+		return false, nil
+	}
+	if strings.TrimSpace(os.Getenv("ECHOSHELL_AUTO_TMUX")) == "0" {
+		return false, nil
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return false, nil
+	}
+
+	cmdline := "ECHOSHELL_IN_TMUX=1 " + shellQuote(os.Args[0])
+	for _, a := range os.Args[1:] {
+		cmdline += " " + shellQuote(a)
+	}
+
+	sessionName := "echoshell"
+	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err == nil {
+		sessionName = fmt.Sprintf("echoshell-%d", os.Getpid())
+	}
+
+	cmd := exec.Command("tmux", "new-session", "-s", sessionName, cmdline)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return true, cmd.Run()
 }
 
 func loadTargetsForSelection(lastTarget string) ([]string, int) {
@@ -360,6 +387,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			switch strings.ToLower(msg.String()) {
 			case "ctrl+c", "q", "esc":
+				cleanupSoftPreview(&m)
 				return m, tea.Quit
 			case "up", "k":
 				if m.selectedTarget > 0 {
@@ -407,6 +435,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyMsg:
 			switch strings.ToLower(msg.String()) {
 			case "ctrl+c", "q":
+				cleanupSoftPreview(&m)
 				return m, tea.Quit
 			case "esc":
 				m.selectingNew = false
@@ -446,6 +475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyMsg:
 			switch strings.ToLower(msg.String()) {
 			case "ctrl+c", "q", "esc":
+				cleanupSoftPreview(&m)
 				return m, tea.Quit
 			case "up", "k":
 				if m.selectedQuick > 0 {
@@ -459,10 +489,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				if len(m.quickCandidates) == 0 {
+					cleanupSoftPreview(&m)
 					return m, tea.Quit
 				}
 				name := m.quickCandidates[m.selectedQuick].Session.Name
 				m.status = "Attaching " + name + "..."
+				cleanupSoftPreview(&m)
 				return m, attachCmd(name)
 			}
 		}
@@ -505,6 +537,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.status = "Attaching " + sel.Name + "..."
+					cleanupSoftPreview(&m)
 					return m, attachCmd(sel.Name)
 				case "refresh":
 					m.status = "Refreshing..."
@@ -516,14 +549,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.updateBusy = true
 					m.status = "Updating from origin/main..."
 					return m, updateCmd()
-				case "target":
-					last := remoteTarget()
-					m.availableTargets, m.selectedTarget = loadTargetsForSelection(last)
-					m.selectingRemote = true
-					m.addingNewRemote = false
-					m.newRemoteInput = ""
-					m.status = "Select remote target..."
-					return m, nil
 				case "destroy":
 					sel, ok := m.selectedSessionInfo()
 					if !ok {
@@ -532,6 +557,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Destroying " + sel.Name + "..."
 					return m, killSessionCmd(sel.Name)
 				case "quit":
+					cleanupSoftPreview(&m)
 					return m, tea.Quit
 				}
 				return m, nil
@@ -591,9 +617,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.multiSelected = nil
 		m.status = fmt.Sprintf("Opened split view (%d panes): %s", msg.count, msg.name)
+		cleanupSoftPreview(&m)
 		return m, attachCmd(msg.name)
 
 	case previewMsg:
+		if m.softAttachPreviewEnabled() {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.previewSession = msg.session
 			m.previewText = "Preview error: " + msg.err.Error()
@@ -608,11 +638,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case softAttachMsg:
+		if msg.err != nil {
+			m.status = "Soft attach failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.previewPane = msg.pane
+		m.previewSession = msg.session
+		return m, nil
+
 	case remoteMsg:
 		if msg.err != nil {
 			m.status = "Remote change failed: " + msg.err.Error()
 			return m, nil
 		}
+		cleanupSoftPreview(&m)
 		selectedRemoteTarget = msg.target
 		_ = rememberRemoteTarget(selectedRemoteTarget)
 		m.preferredWorkspace, _ = loadLastWorkspaceTarget(selectedRemoteTarget)
@@ -624,6 +664,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch strings.ToLower(msg.String()) {
 		case "ctrl+c":
+			cleanupSoftPreview(&m)
 			return m, tea.Quit
 		case "d":
 			sel, ok := m.selectedSessionInfo()
@@ -659,12 +700,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "up":
-			if m.shiftSession(-1) {
+			if m.shiftVertical(-1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
 		case "down":
-			if m.shiftSession(1) {
+			if m.shiftVertical(1) {
 				return m, previewCmdForSelection(m)
 			}
 			return m, nil
@@ -674,6 +715,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = "Attaching " + sel.Name + "..."
+			cleanupSoftPreview(&m)
 			return m, attachCmd(sel.Name)
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			s := strings.ToLower(msg.String())
@@ -802,7 +844,7 @@ func (m model) View() string {
 	}
 
 	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav  enter attach  d destroy  0 menu  o opencode  l lazygit  c claude  b bash")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (soft attach right)  enter full attach  d destroy  0 menu  o opencode  l lazygit  c claude  b bash")
 	help := helpNav
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
@@ -813,10 +855,8 @@ func (m model) View() string {
 
 	leftW := 30
 	if m.width > 0 {
-		leftW = max(34, min(60, m.width/3))
+		leftW = max(34, m.width-4)
 	}
-	rightW := max(50, m.width-leftW-6)
-
 	bodyH := 0
 	// Layout is: title (1) + remote (1) + body + status (1) + help (2)
 	if m.height > 0 {
@@ -824,8 +864,7 @@ func (m model) View() string {
 	}
 
 	left := m.renderWorkspaces(leftW, bodyH)
-	right := m.renderSessions(rightW)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	body := left
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, remote, body, status, help)
 }
@@ -835,58 +874,50 @@ func (m model) renderWorkspaces(width, height int) string {
 	if height > 0 {
 		box = box.Height(height)
 	}
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Workspaces")
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Repos")
 
-	wsNorm := lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Padding(0, 1)
 	repoSel := lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
 	sessSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Padding(0, 1)
 	sessNorm := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Padding(0, 1)
 
 	lines := []string{title, ""}
-	workspaces := m.workspaceList()
-	for wi, ws := range workspaces {
-		total := m.workspaceTotalSessions(ws)
-		header := fmt.Sprintf("== %s == (%d)", ws, total)
-		headerStyled := wsNorm.Render(header)
-		lines = append(lines, headerStyled)
+	for i, g := range m.groups {
+		markerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(repoColor(g.Repo))).Bold(true)
+		marker := " "
+		if i == m.selectedWorkspace {
+			marker = "|"
+		}
+		repoLine := fmt.Sprintf("%s %s (%d)", markerStyle.Render(marker), g.Repo, len(g.Sessions))
+		repoColor := lipgloss.NewStyle().Foreground(lipgloss.Color(repoColor(g.Repo))).Padding(0, 1)
+		if i == m.selectedWorkspace {
+			lines = append(lines, repoSel.Render(repoLine))
+		} else {
+			lines = append(lines, repoColor.Render(repoLine))
+		}
 
-		for _, i := range m.repoIndexesForWorkspace(ws) {
-			g := m.groups[i]
-			markerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(repoColor(g.Repo))).Bold(true)
-			marker := " "
-			if i == m.selectedWorkspace {
-				marker = "|"
+		for si, s := range g.Sessions {
+			att := " "
+			if s.Attached {
+				att = "*"
 			}
-			repoLine := fmt.Sprintf("%s %s (%d)", markerStyle.Render(marker), g.Repo, len(g.Sessions))
-			repoColor := lipgloss.NewStyle().Foreground(lipgloss.Color(repoColor(g.Repo))).Padding(0, 1)
-			if i == m.selectedWorkspace {
-				lines = append(lines, repoSel.Render(repoLine))
-			} else {
-				lines = append(lines, repoColor.Render(repoLine))
-			}
-			for si, s := range g.Sessions {
-				att := " "
-				if s.Attached {
-					att = "*"
-				}
-				name := trimRepoPrefix(g.Repo, s.Name)
-				mark := " "
-				if i == m.selectedWorkspace && si == m.selectedSession {
-					if m.previewErr {
-						mark = "!"
-					} else {
-						mark = "."
-					}
-				}
-				sLine := fmt.Sprintf("  %s %s %s", mark, att, name)
-				if i == m.selectedWorkspace && si == m.selectedSession {
-					lines = append(lines, sessSel.Render(sLine))
+			name := trimRepoPrefix(g.Repo, s.Name)
+			mark := " "
+			if i == m.selectedWorkspace && si == m.selectedSession {
+				if m.previewErr {
+					mark = "!"
 				} else {
-					lines = append(lines, sessNorm.Render(sLine))
+					mark = "."
 				}
+			}
+			sLine := fmt.Sprintf("  %s %s %s", mark, att, name)
+			if i == m.selectedWorkspace && si == m.selectedSession {
+				lines = append(lines, sessSel.Render(sLine))
+			} else {
+				lines = append(lines, sessNorm.Render(sLine))
 			}
 		}
-		if wi != len(workspaces)-1 {
+
+		if i != len(m.groups)-1 {
 			lines = append(lines, "")
 		}
 	}
@@ -934,7 +965,6 @@ func buildMenuItems(m model) []menuItem {
 	}
 	items = append(items, menuItem{Label: "Refresh", Key: "refresh"})
 	items = append(items, menuItem{Label: "Update", Key: "update"})
-	items = append(items, menuItem{Label: "Switch target", Key: "target"})
 	items = append(items, menuItem{Label: "Quit", Key: "quit"})
 	return items
 }
@@ -1023,8 +1053,8 @@ func (m model) repoOrder() []int {
 		return nil
 	}
 	out := make([]int, 0, len(m.groups))
-	for _, ws := range m.workspaceList() {
-		out = append(out, m.repoIndexesForWorkspace(ws)...)
+	for i := range m.groups {
+		out = append(out, i)
 	}
 	return out
 }
@@ -1109,6 +1139,43 @@ func (m *model) shiftSession(direction int) bool {
 	return false
 }
 
+func (m *model) shiftVertical(direction int) bool {
+	order := m.repoOrder()
+	if len(order) == 0 {
+		return false
+	}
+
+	type pos struct {
+		repo int
+		sess int
+	}
+
+	positions := make([]pos, 0, len(order)*2)
+	for _, repoIdx := range order {
+		positions = append(positions, pos{repo: repoIdx, sess: -1})
+		for si := range m.groups[repoIdx].Sessions {
+			positions = append(positions, pos{repo: repoIdx, sess: si})
+		}
+	}
+	if len(positions) == 0 {
+		return false
+	}
+
+	cur := 0
+	for i, p := range positions {
+		if p.repo == m.selectedWorkspace && p.sess == m.selectedSession {
+			cur = i
+			break
+		}
+	}
+
+	next := (cur + direction + len(positions)) % len(positions)
+	m.selectedWorkspace = positions[next].repo
+	m.selectedSession = positions[next].sess
+	m.captureActive()
+	return true
+}
+
 func groupWorkspaceName(g workspaceGroup) string {
 	ws := strings.TrimSpace(g.Workspace)
 	if ws == "" {
@@ -1128,8 +1195,8 @@ func (m model) renderSessions(width int) string {
 		previewLines = []string{"(select a session)"}
 	}
 	if len(previewLines) > maxPreviewLines {
-		previewLines = previewLines[:maxPreviewLines]
-		previewLines = append(previewLines, "...")
+		previewLines = previewLines[len(previewLines)-maxPreviewLines:]
+		previewLines[0] = "..."
 	}
 	for len(previewLines) < maxPreviewLines {
 		previewLines = append(previewLines, "")
@@ -1272,7 +1339,7 @@ func defaultSessionTemplates() []sessionTemplate {
 	return []sessionTemplate{
 		{Label: "Shell (default)", Name: "shell", Command: ""},
 		{Label: "Claude (claude)", Name: "claude", Command: "claude"},
-		{Label: "Claude FULL (IS_SANDBOX=1 claude --dangerously-skip-permissions)", Name: "claude-full", Command: "IS_SANDBOX=1 claude --dangerously-skip-permissions"},
+		{Label: "Claude FULL (sandbox off)", Name: "claude-full", Command: "IS_SANDBOX=1 claude --dangerously-skip-permissions"},
 		{Label: "OpenCode (opencode)", Name: "opencode", Command: "opencode"},
 		{Label: "Lazygit (lazygit)", Name: "lazygit", Command: "lazygit"},
 	}
@@ -1387,9 +1454,130 @@ func (m model) newSessionRepo() string {
 func previewCmdForSelection(m model) tea.Cmd {
 	sel, ok := m.selectedSessionInfo()
 	if !ok {
+		if len(m.groups) == 0 || m.selectedWorkspace < 0 || m.selectedWorkspace >= len(m.groups) {
+			return nil
+		}
+		sessions := m.groups[m.selectedWorkspace].Sessions
+		if len(sessions) == 0 {
+			return nil
+		}
+		sel = sessions[0]
+	}
+	if m.previewPane != "" && m.previewSession == sel.Name {
 		return nil
 	}
-	return loadPreviewCmd(sel.Name)
+	if splitTarget, ok := detectSoftAttachTarget(); ok {
+		return softAttachPreviewCmd(m.previewPane, splitTarget, sel.Name)
+	}
+	return softAttachPreviewCmd(m.previewPane, "", sel.Name)
+}
+
+func (m model) softAttachPreviewEnabled() bool {
+	return strings.TrimSpace(m.previewPane) != ""
+}
+
+func softAttachPreviewCmd(currentPane, splitTarget, session string) tea.Cmd {
+	return func() tea.Msg {
+		pane, err := ensureSoftPreviewPane(currentPane, splitTarget, session)
+		return softAttachMsg{pane: pane, session: session, err: err}
+	}
+}
+
+func ensureSoftPreviewPane(currentPane, splitTarget, session string) (string, error) {
+	cmd := softAttachPaneCommand(session)
+	pane := strings.TrimSpace(currentPane)
+	if pane != "" {
+		if _, err := runOut("tmux", "display-message", "-p", "-t", pane, "#{pane_id}"); err == nil {
+			_, err = runOut("tmux", "respawn-pane", "-k", "-t", pane, cmd)
+			if err != nil {
+				return "", err
+			}
+			return pane, nil
+		}
+	}
+
+	args := []string{"split-window", "-h", "-p", "75", "-d", "-P", "-F", "#{pane_id}"}
+	if strings.TrimSpace(splitTarget) != "" {
+		args = append(args, "-t", strings.TrimSpace(splitTarget))
+	}
+	args = append(args, cmd)
+	out, err := runOut("tmux", args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func softAttachPaneCommand(session string) string {
+	if isLocalRemote() {
+		return "TMUX= tmux attach-session -t " + shellQuote(session)
+	}
+	args := []string{"mosh", remoteTarget(), "--", "tmux", "attach-session", "-t", session}
+	return shellJoin(args)
+}
+
+func detectSoftAttachTarget() (string, bool) {
+	if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+		out, err := runOut("tmux", "display-message", "-p", "#{pane_id}")
+		if err == nil {
+			pane := strings.TrimSpace(out)
+			if pane != "" {
+				return pane, true
+			}
+		}
+		return "", true
+	}
+
+	tty, err := os.Readlink("/proc/self/fd/0")
+	if err == nil {
+		tty = strings.TrimSpace(tty)
+		if tty != "" {
+			out, derr := runOut("tmux", "display-message", "-p", "-t", tty, "#{pane_id}")
+			if derr == nil {
+				pane := strings.TrimSpace(out)
+				if pane != "" {
+					return pane, true
+				}
+			}
+		}
+	}
+
+	out, err := runOut("tmux", "list-panes", "-a", "-F", "#{pane_id}")
+	if err != nil {
+		return "", false
+	}
+	for _, ln := range strings.Split(out, "\n") {
+		v := strings.TrimSpace(ln)
+		if v != "" {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+func cleanupSoftPreview(m *model) {
+	cleanupSoftPreviewPane(m.previewPane)
+	m.previewPane = ""
+	m.previewSession = ""
+}
+
+func cleanupSoftPreviewPane(pane string) {
+	pane = strings.TrimSpace(pane)
+	if pane == "" {
+		return
+	}
+	_, _ = runOut("tmux", "kill-pane", "-t", pane)
+}
+
+func (m model) canFocusSoftAttach() bool {
+	return strings.TrimSpace(m.previewPane) != "" && strings.TrimSpace(os.Getenv("TMUX")) != ""
+}
+
+func (m model) focusSoftAttach() {
+	if !m.canFocusSoftAttach() {
+		return
+	}
+	_, _ = runOut("tmux", "select-pane", "-t", m.previewPane)
 }
 
 func loadPreviewCmd(session string) tea.Cmd {
@@ -1401,12 +1589,12 @@ func loadPreviewCmd(session string) tea.Cmd {
 
 func capturePreview(session string) (string, error) {
 	// capture-pane targets a pane; use the first pane of the first window by default.
-	// Use -e so interactive TUIs (lazygit, etc.) render with color.
+	// Use -J to join wrapped lines for cleaner rendering in this fixed preview area.
 	// Fallback to the session target for older tmux/edge cases.
 	pane := session + ":0.0"
-	out, err := runTmuxOut("capture-pane", "-p", "-e", "-t", pane)
+	out, err := runTmuxOut("capture-pane", "-p", "-J", "-t", pane)
 	if err != nil {
-		out2, err2 := runTmuxOut("capture-pane", "-p", "-e", "-t", session)
+		out2, err2 := runTmuxOut("capture-pane", "-p", "-J", "-t", session)
 		if err2 != nil {
 			return "", err
 		}
@@ -1417,6 +1605,7 @@ func capturePreview(session string) (string, error) {
 
 func cleanPreview(out string) string {
 	out = strings.ReplaceAll(out, "\r", "")
+	out = ansiRE.ReplaceAllString(out, "")
 	return strings.Trim(out, "\n")
 }
 
@@ -1577,34 +1766,50 @@ func groupedSessions() ([]workspaceGroup, error) {
 }
 
 func discoverRepoGroups() ([]workspaceGroup, error) {
-	const root = "/root/workspaces"
+	root := remoteGitRoot()
 	groups := []workspaceGroup{{Workspace: "root", Repo: "root", Name: "root", Path: "/", Sessions: nil}}
 
-	workspaces, err := remoteListDirNames(root)
+	repos, err := remoteListDirNames(root)
 	if err != nil {
 		return groups, nil
 	}
-	for _, ws := range workspaces {
-		repoRoot := filepath.Join(root, ws, "data", "repos")
-		repos, rerr := remoteListDirNames(repoRoot)
-		if rerr != nil {
-			continue
-		}
-		for _, repo := range repos {
-			groups = append(groups, workspaceGroup{
-				Workspace: ws,
-				Repo:      repo,
-				Name:      ws + "/" + repo,
-				Path:      filepath.Join(repoRoot, repo),
-				Sessions:  nil,
-			})
-		}
+	for _, repo := range repos {
+		groups = append(groups, workspaceGroup{
+			Workspace: "git",
+			Repo:      repo,
+			Name:      "git/" + repo,
+			Path:      filepath.Join(root, repo),
+			Sessions:  nil,
+		})
 	}
 
 	sort.Slice(groups[1:], func(i, j int) bool {
 		return groups[1+i].Name < groups[1+j].Name
 	})
 	return groups, nil
+}
+
+func remoteGitRoot() string {
+	if isLocalRemote() {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			home = strings.TrimSpace(home)
+			if home != "" {
+				return filepath.Join(home, "git")
+			}
+		}
+		return "/root/git"
+	}
+
+	out, err := runSSHShOut(remoteTarget(), `printf %s "$HOME"`)
+	if err != nil {
+		return "/root/git"
+	}
+	home := strings.TrimSpace(out)
+	if home == "" {
+		return "/root/git"
+	}
+	return filepath.Join(home, "git")
 }
 
 func discoverRepoGroupsCached() ([]workspaceGroup, error) {
@@ -1776,14 +1981,7 @@ func hasGitDir(dir string) bool {
 }
 
 func remoteTarget() string {
-	v := strings.TrimSpace(selectedRemoteTarget)
-	if v == "" {
-		return defaultRemoteTarget
-	}
-	if strings.EqualFold(v, "localhost") || strings.EqualFold(v, "root@localhost") {
-		return "local"
-	}
-	return v
+	return defaultRemoteTarget
 }
 
 func isLocalRemote() bool {
@@ -1803,19 +2001,11 @@ func tmuxAttachCmd(session string) *exec.Cmd {
 	if isLocalRemote() {
 		return exec.Command("tmux", "attach-session", "-t", session)
 	}
-	if shouldUseMosh() {
-		return exec.Command("mosh", remoteTarget(), "--", "tmux", "attach-session", "-t", session)
-	}
-	remoteCmd := "tmux attach-session -t " + shellQuote(session)
-	args := append(sshAttachArgs(remoteTarget()), "sh -lc "+shellQuote(remoteCmd))
-	return exec.Command("ssh", args...)
+	return exec.Command("mosh", remoteTarget(), "--", "tmux", "attach-session", "-t", session)
 }
 
 func shouldUseMosh() bool {
 	if isLocalRemote() {
-		return false
-	}
-	if strings.TrimSpace(os.Getenv("ECHOSHELL_ATTACH")) == "ssh" {
 		return false
 	}
 	if _, err := exec.LookPath("mosh"); err != nil {
