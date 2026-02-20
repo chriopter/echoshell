@@ -866,7 +866,7 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
 	}
 
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (soft attach right)  enter full attach  n new  d destroy  r refresh  0 menu  o opencode  l lazygit  c claude  b bash")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (preview right)  enter full attach  n new  d destroy  r refresh  0 menu  o opencode  l lazygit  c claude  b bash")
 	help := helpNav
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
@@ -1629,11 +1629,9 @@ func ensureSoftPreviewPane(currentPane, splitTarget, session string) (string, er
 }
 
 func softAttachPaneCommand(session string) string {
-	if isLocalRemote() {
-		return "TMUX= tmux attach-session -t " + shellQuote(session)
-	}
-	args := []string{"mosh", remoteTarget(), "--", "tmux", "attach-session", "-t", session}
-	return shellJoin(args)
+	paneTarget := shellQuote(session + ":0.0")
+	sessionTarget := shellQuote(session)
+	return "while true; do clear; tmux capture-pane -p -J -S -120 -t " + paneTarget + " 2>/dev/null || tmux capture-pane -p -J -S -120 -t " + sessionTarget + " 2>/dev/null || printf '(no output yet)\\n'; sleep 1; done"
 }
 
 func detectSoftAttachTarget() (string, bool) {

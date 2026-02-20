@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAttachableSessionFromRepoRow(t *testing.T) {
 	m := model{
@@ -95,5 +98,15 @@ func TestTmuxAttachCmdUsesAttachOutsideTmux(t *testing.T) {
 	}
 	if cmd.Args[3] != "my-session" {
 		t.Fatalf("expected target my-session, got %#v", cmd.Args)
+	}
+}
+
+func TestSoftAttachPaneCommandDoesNotAttachSession(t *testing.T) {
+	cmd := softAttachPaneCommand("my-session")
+	if strings.Contains(cmd, "attach-session") {
+		t.Fatalf("preview command must not attach session: %q", cmd)
+	}
+	if !strings.Contains(cmd, "capture-pane") {
+		t.Fatalf("preview command should capture pane output: %q", cmd)
 	}
 }
