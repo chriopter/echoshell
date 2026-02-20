@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,6 +26,7 @@ var selectedRemoteTarget = ""
 var updateRepoDir = ""
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 var repoGroupCache = map[string][]workspaceGroup{}
+var repoGroupCacheMu sync.RWMutex
 
 type sessionInfo struct {
 	Name     string
@@ -51,6 +53,10 @@ type tickMsg time.Time
 type actionMsg struct {
 	status string
 	err    error
+}
+
+type attachResultMsg struct {
+	err error
 }
 
 type createdMsg struct {
@@ -598,6 +604,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = msg.status
 		return m, loadCmd()
 
+	case attachResultMsg:
+		if msg.err != nil {
+			m.status = "Attach failed: " + msg.err.Error()
+			return m, nil
+		}
+		cleanupSoftPreview(&m)
+		return m, tea.Quit
+
 	case createdMsg:
 		if msg.err != nil {
 			m.status = "Action failed: " + msg.err.Error()
@@ -673,6 +687,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.status = "Destroying " + sel.Name + "..."
 			return m, killSessionCmd(sel.Name)
+		case "n":
+			m.selectingNew = true
+			m.selectedTemplate = 0
+			m.status = "Choose new session command"
+			return m, nil
+		case "r":
+			m.status = "Refreshing..."
+			return m, loadCmd()
 		case "0":
 			m.menuItems = buildMenuItems(m)
 			m.selectedMenu = 0
@@ -710,8 +732,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			sel, ok := m.selectedSessionInfo()
+			sel, ok := m.attachableSession()
 			if !ok {
+				m.status = "No attachable session"
 				return m, nil
 			}
 			m.status = "Attaching " + sel.Name + "..."
@@ -843,14 +866,13 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
 	}
 
-	remote := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("remote: " + remoteTarget())
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (soft attach right)  enter full attach  d destroy  0 menu  o opencode  l lazygit  c claude  b bash")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (soft attach right)  enter full attach  n new  d destroy  r refresh  0 menu  o opencode  l lazygit  c claude  b bash")
 	help := helpNav
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
 	if len(m.groups) == 0 {
 		empty := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(1, 2).Render("No sessions")
-		return lipgloss.JoinVertical(lipgloss.Left, title, remote, empty, status, help)
+		return lipgloss.JoinVertical(lipgloss.Left, title, empty, status, help)
 	}
 
 	leftW := 30
@@ -858,15 +880,15 @@ func (m model) View() string {
 		leftW = max(34, m.width-4)
 	}
 	bodyH := 0
-	// Layout is: title (1) + remote (1) + body + status (1) + help (2)
+	// Layout is: title (1) + body + status (1) + help (2)
 	if m.height > 0 {
-		bodyH = max(8, m.height-5)
+		bodyH = max(8, m.height-4)
 	}
 
 	left := m.renderWorkspaces(leftW, bodyH)
 	body := left
 
-	return lipgloss.JoinVertical(lipgloss.Left, title, remote, body, status, help)
+	return lipgloss.JoinVertical(lipgloss.Left, title, body, status, help)
 }
 
 func (m model) renderWorkspaces(width, height int) string {
@@ -1243,6 +1265,10 @@ func (m *model) restoreSelection() {
 
 	cur := m.currentSessions()
 	if len(cur) == 0 {
+		if m.selectFirstWorkspaceWithSessions() {
+			m.captureActive()
+			return
+		}
 		m.selectedSession = -1
 		m.captureActive()
 		return
@@ -1302,6 +1328,42 @@ func (m model) selectedSessionInfo() (sessionInfo, bool) {
 		return sessionInfo{}, false
 	}
 	return cur[m.selectedSession], true
+}
+
+func (m *model) selectFirstWorkspaceWithSessions() bool {
+	for i := range m.groups {
+		if len(m.groups[i].Sessions) == 0 {
+			continue
+		}
+		m.selectedWorkspace = i
+		m.selectedSession = defaultSessionIndex(m.groups[i].Sessions)
+		return m.selectedSession >= 0
+	}
+	return false
+}
+
+func (m *model) attachableSession() (sessionInfo, bool) {
+	if sel, ok := m.selectedSessionInfo(); ok {
+		return sel, true
+	}
+
+	cur := m.currentSessions()
+	if len(cur) > 0 {
+		m.selectedSession = defaultSessionIndex(cur)
+		if sel, ok := m.selectedSessionInfo(); ok {
+			m.captureActive()
+			return sel, true
+		}
+	}
+
+	if !m.selectFirstWorkspaceWithSessions() {
+		return sessionInfo{}, false
+	}
+	if sel, ok := m.selectedSessionInfo(); ok {
+		m.captureActive()
+		return sel, true
+	}
+	return sessionInfo{}, false
 }
 
 func loadCmd() tea.Cmd {
@@ -1416,12 +1478,70 @@ func sanitizeSessionToken(s string) string {
 
 func killSessionCmd(name string) tea.Cmd {
 	return func() tea.Msg {
+		if cur := currentLocalTmuxSession(); cur != "" && name == cur {
+			return actionMsg{err: errors.New("refusing to destroy current echoshell session")}
+		}
 		_, err := runTmuxOut("kill-session", "-t", name)
 		if err != nil {
 			return actionMsg{err: err}
 		}
 		return actionMsg{status: "Destroyed " + name}
 	}
+}
+
+func currentLocalTmuxSession() string {
+	if !isLocalRemote() {
+		return ""
+	}
+	if pane := strings.TrimSpace(os.Getenv("TMUX_PANE")); pane != "" {
+		if out, err := runOut("tmux", "display-message", "-p", "-t", pane, "#{session_name}"); err == nil {
+			name := strings.TrimSpace(out)
+			if name != "" {
+				return name
+			}
+		}
+	}
+	if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+		out, err := runOut("tmux", "display-message", "-p", "#{session_name}")
+		if err == nil {
+			name := strings.TrimSpace(out)
+			if name != "" {
+				return name
+			}
+		}
+	}
+	if tty, err := os.Readlink("/proc/self/fd/0"); err == nil {
+		tty = strings.TrimSpace(tty)
+		if tty != "" {
+			if out, derr := runOut("tmux", "display-message", "-p", "-t", tty, "#{session_name}"); derr == nil {
+				name := strings.TrimSpace(out)
+				if name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isBootstrapSessionName(name string) bool {
+	n := strings.TrimSpace(name)
+	if n == "echoshell" {
+		return true
+	}
+	if !strings.HasPrefix(n, "echoshell-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(n, "echoshell-")
+	if suffix == "" {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (m model) newSessionPath() string {
@@ -1615,10 +1735,7 @@ func tickCmd() tea.Cmd {
 
 func attachCmd(session string) tea.Cmd {
 	return tea.ExecProcess(tmuxAttachCmd(session), func(err error) tea.Msg {
-		if err != nil {
-			return actionMsg{err: err}
-		}
-		return actionMsg{status: "Detached from " + session}
+		return attachResultMsg{err: err}
 	})
 }
 
@@ -1684,6 +1801,7 @@ func groupedSessions() ([]workspaceGroup, error) {
 	if err != nil {
 		return nil, err
 	}
+	currentSession := currentLocalTmuxSession()
 
 	metaOut, err := runTmuxOut("list-sessions", "-F", "#{session_name}|#{session_attached}|#{session_windows}")
 	if err != nil {
@@ -1698,14 +1816,15 @@ func groupedSessions() ([]workspaceGroup, error) {
 		return groups, nil
 	}
 
-	pathOut, _ := runTmuxOut("list-panes", "-a", "-F", "#{session_name}|#{pane_index}|#{pane_current_path}")
+	pathOut, _ := runTmuxOut("list-panes", "-a", "-F", "#{session_name}|#{pane_index}|#{pane_current_path}|#{pane_current_command}")
 	pathBySession := map[string]string{}
+	commandBySession := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(pathOut), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 3)
-		if len(parts) != 3 {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 {
 			continue
 		}
 		if strings.TrimSpace(parts[1]) != "0" {
@@ -1717,6 +1836,9 @@ func groupedSessions() ([]workspaceGroup, error) {
 		}
 		if _, ok := pathBySession[sn]; !ok {
 			pathBySession[sn] = strings.TrimSpace(parts[2])
+		}
+		if _, ok := commandBySession[sn]; !ok {
+			commandBySession[sn] = strings.TrimSpace(parts[3])
 		}
 	}
 
@@ -1731,6 +1853,15 @@ func groupedSessions() ([]workspaceGroup, error) {
 		}
 		name := strings.TrimSpace(parts[0])
 		if name == "" {
+			continue
+		}
+		if isBootstrapSessionName(name) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(commandBySession[name]), "echoshell") {
+			continue
+		}
+		if currentSession != "" && name == currentSession {
 			continue
 		}
 		workdir := strings.TrimSpace(pathBySession[name])
@@ -1814,7 +1945,11 @@ func remoteGitRoot() string {
 
 func discoverRepoGroupsCached() ([]workspaceGroup, error) {
 	target := remoteTarget()
-	if groups, ok := repoGroupCache[target]; ok {
+
+	repoGroupCacheMu.RLock()
+	groups, ok := repoGroupCache[target]
+	repoGroupCacheMu.RUnlock()
+	if ok {
 		out := make([]workspaceGroup, len(groups))
 		copy(out, groups)
 		for i := range out {
@@ -1829,7 +1964,9 @@ func discoverRepoGroupsCached() ([]workspaceGroup, error) {
 	}
 	copyGroups := make([]workspaceGroup, len(groups))
 	copy(copyGroups, groups)
+	repoGroupCacheMu.Lock()
 	repoGroupCache[target] = copyGroups
+	repoGroupCacheMu.Unlock()
 
 	for i := range groups {
 		groups[i].Sessions = nil
@@ -1977,31 +2114,29 @@ func hasGitDir(dir string) bool {
 	if err != nil {
 		return false
 	}
-	return st.IsDir()
+	if st.IsDir() {
+		return true
+	}
+	return st.Mode().IsRegular()
 }
 
 func remoteTarget() string {
-	return defaultRemoteTarget
+	return "local"
 }
 
 func isLocalRemote() bool {
-	r := strings.TrimSpace(strings.ToLower(remoteTarget()))
-	return r == "" || r == "local"
+	return true
 }
 
 func runTmuxOut(args ...string) (string, error) {
-	if isLocalRemote() {
-		return runOut("tmux", args...)
-	}
-	remoteCmd := "tmux " + shellJoin(args)
-	return runSSHShOut(remoteTarget(), remoteCmd)
+	return runOut("tmux", args...)
 }
 
 func tmuxAttachCmd(session string) *exec.Cmd {
-	if isLocalRemote() {
-		return exec.Command("tmux", "attach-session", "-t", session)
+	if strings.TrimSpace(os.Getenv("TMUX")) != "" {
+		return exec.Command("tmux", "switch-client", "-t", session)
 	}
-	return exec.Command("mosh", remoteTarget(), "--", "tmux", "attach-session", "-t", session)
+	return exec.Command("tmux", "attach-session", "-t", session)
 }
 
 func shouldUseMosh() bool {

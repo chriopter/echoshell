@@ -20,10 +20,12 @@ Local:
 echoshell
 ```
 
-Remote (recommended):
+Via mosh to the target machine (recommended):
 ```bash
 mosh root@your-server -- echoshell
 ```
+
+`echoshell` is local-only: it always talks to tmux on the machine where `echoshell` is running.
 
 You do not need to run tmux manually in the command. `echoshell` auto-starts inside tmux when needed.
 
@@ -33,6 +35,8 @@ You do not need to run tmux manually in the command. `echoshell` auto-starts ins
 - `Left/Right`: prev/next repo
 - `Up/Down`: move through repos and sessions
 - `Enter`: attach selected session
+- `n`: new session template menu
+- `d`: destroy selected session
 - `0`: menu (refresh/update/quit)
 - `o`: spawn `opencode`
 - `l`: spawn `lazygit`
@@ -42,3 +46,5 @@ You do not need to run tmux manually in the command. `echoshell` auto-starts ins
 - `q` / `Esc`: quit
 
 Search args (for example `echoshell v l`) do quick fuzzy attach.
+
+Safety: the tmux session currently running `echoshell` is hidden from the picker and cannot be destroyed from inside `echoshell`.
