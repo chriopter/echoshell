@@ -1,79 +1,44 @@
 # echoshell
 
-KISS tmux picker.
-
-- Lists tmux sessions
-- Shows repo entries from `~/git/*`
-- Includes `root` entry (new sessions there start in `/`)
-- Attaches fast from a small TUI
-- Runs local-only inside tmux (KISS)
+KISS tmux session picker for repos in `~/git/*`.
 
 ## Build
 ```bash
 go build -o echoshell .
 ```
 
-## Install (recommended)
-
-Build in the repo, then put a symlink on your PATH so `echoshell` always runs the repo-built binary:
-
+## Install
 ```bash
 go build -o echoshell .
 mkdir -p ~/.local/bin
 ln -sf "$(pwd)/echoshell" ~/.local/bin/echoshell
 ```
 
-If `~/.local/bin` is not on your PATH, add it in your shell config.
-
-The `u` (update) action will work with this setup because it rebuilds in the git repo and the symlink keeps pointing at the updated binary.
-
 ## Run
+Local:
 ```bash
-./echoshell
-./echoshell v l
-```
-
-## Recommended remote usage (mosh)
-
-Run echoshell directly on the remote host inside tmux:
-
-```bash
-mosh root@your-server -- tmux new -As main
 echoshell
 ```
 
-Passing search terms (for example `v l`) does quick fuzzy matching against existing session names/workspace/repo:
-- one match: attach immediately
-- multiple matches: opens a selector
+Remote (recommended):
+```bash
+mosh root@your-server -- echoshell
+```
+
+You do not need to run tmux manually in the command. `echoshell` auto-starts inside tmux when needed.
 
 ## Keys
-
-**Session Management:**
 - `1..9`: select repo
 - `Tab` / `Shift+Tab`: next/prev repo
 - `Left/Right`: prev/next repo
-- `Up/Down`: move vertically through repos and sessions
-- `Enter`: full attach to selected session
-- `0`: command menu (refresh/update/quit/etc)
-- `o`: spawn `opencode` in selected repo
-- `l`: spawn `lazygit` in selected repo
-- `c`: spawn claude FULL in selected repo
-- `b`: spawn bash shell in selected repo
+- `Up/Down`: move through repos and sessions
+- `Enter`: attach selected session
+- `0`: menu (refresh/update/quit)
+- `o`: spawn `opencode`
+- `l`: spawn `lazygit`
+- `c`: spawn claude full
+- `b`: spawn bash
 - `r`: refresh
-- `q` or `Esc`: quit
+- `q` / `Esc`: quit
 
-When running inside tmux, moving selection updates a soft-attach preview in a right split pane.
-
-`n` command picker options:
-- `Shell (default)`
-- `Claude (claude)`
-- `Claude FULL (sandbox off)`
-- `OpenCode (opencode)`
-- `Lazygit (lazygit)`
-
-New session names use `repo-command-number` (example: `valiido-lazygit-1`).
-
-Session preview updates as you move selection.
-After `n`, new session becomes selected and previewed.
-
-Last repo group selection is stored in `~/.config/echoshell/workspaces.txt`.
+Search args (for example `echoshell v l`) do quick fuzzy attach.
