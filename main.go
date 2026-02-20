@@ -880,9 +880,9 @@ func (m model) View() string {
 		leftW = max(34, m.width-4)
 	}
 	bodyH := 0
-	// Layout is: title (1) + body + status (1) + help (2)
+	// Layout is: title (1) + body + status (1) + help (1)
 	if m.height > 0 {
-		bodyH = max(8, m.height-4)
+		bodyH = max(8, m.height-3)
 	}
 
 	left := m.renderWorkspaces(leftW, bodyH)
@@ -1605,6 +1605,7 @@ func softAttachPreviewCmd(currentPane, splitTarget, session string) tea.Cmd {
 
 func ensureSoftPreviewPane(currentPane, splitTarget, session string) (string, error) {
 	cmd := softAttachPaneCommand(session)
+	owner := strings.TrimSpace(splitTarget)
 	pane := strings.TrimSpace(currentPane)
 	if pane != "" {
 		if _, err := runOut("tmux", "display-message", "-p", "-t", pane, "#{pane_id}"); err == nil {
@@ -1612,26 +1613,30 @@ func ensureSoftPreviewPane(currentPane, splitTarget, session string) (string, er
 			if err != nil {
 				return "", err
 			}
+			if owner != "" {
+				_, _ = runOut("tmux", "select-pane", "-t", owner)
+			}
 			return pane, nil
 		}
 	}
 
 	args := []string{"split-window", "-h", "-p", "75", "-d", "-P", "-F", "#{pane_id}"}
-	if strings.TrimSpace(splitTarget) != "" {
-		args = append(args, "-t", strings.TrimSpace(splitTarget))
+	if owner != "" {
+		args = append(args, "-t", owner)
 	}
 	args = append(args, cmd)
 	out, err := runOut("tmux", args...)
 	if err != nil {
 		return "", err
 	}
+	if owner != "" {
+		_, _ = runOut("tmux", "select-pane", "-t", owner)
+	}
 	return strings.TrimSpace(out), nil
 }
 
 func softAttachPaneCommand(session string) string {
-	paneTarget := shellQuote(session + ":0.0")
-	sessionTarget := shellQuote(session)
-	return "while true; do clear; tmux capture-pane -p -J -S -120 -t " + paneTarget + " 2>/dev/null || tmux capture-pane -p -J -S -120 -t " + sessionTarget + " 2>/dev/null || printf '(no output yet)\\n'; sleep 1; done"
+	return "TMUX= tmux attach-session -r -t " + shellQuote(session)
 }
 
 func detectSoftAttachTarget() (string, bool) {

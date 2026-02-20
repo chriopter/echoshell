@@ -101,12 +101,15 @@ func TestTmuxAttachCmdUsesAttachOutsideTmux(t *testing.T) {
 	}
 }
 
-func TestSoftAttachPaneCommandDoesNotAttachSession(t *testing.T) {
+func TestSoftAttachPaneCommandUsesReadOnlyAttach(t *testing.T) {
 	cmd := softAttachPaneCommand("my-session")
-	if strings.Contains(cmd, "attach-session") {
-		t.Fatalf("preview command must not attach session: %q", cmd)
+	if !strings.Contains(cmd, "TMUX=") {
+		t.Fatalf("preview command should clear TMUX: %q", cmd)
 	}
-	if !strings.Contains(cmd, "capture-pane") {
-		t.Fatalf("preview command should capture pane output: %q", cmd)
+	if !strings.Contains(cmd, "attach-session") {
+		t.Fatalf("preview command should attach session: %q", cmd)
+	}
+	if !strings.Contains(cmd, "-r") {
+		t.Fatalf("preview command should be read-only: %q", cmd)
 	}
 }
