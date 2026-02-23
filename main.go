@@ -2206,12 +2206,37 @@ func ensureTmuxMouseMode() {
 		return
 	}
 
-	current, err := runTmuxOut("show-options", "-gqv", "mouse")
-	if err == nil && strings.EqualFold(strings.TrimSpace(current), desired) {
-		return
+	_, _ = runTmuxOut("set-option", "-g", "mouse", desired)
+
+	for _, session := range tmuxListTargets("list-sessions", "-F", "#{session_name}") {
+		_, _ = runTmuxOut("set-option", "-t", session, "mouse", desired)
 	}
 
-	_, _ = runTmuxOut("set-option", "-g", "mouse", desired)
+	for _, window := range tmuxListTargets("list-windows", "-a", "-F", "#{session_name}:#{window_index}") {
+		_, _ = runTmuxOut("set-option", "-w", "-t", window, "mouse", desired)
+	}
+}
+
+func tmuxListTargets(args ...string) []string {
+	out, err := runTmuxOut(args...)
+	if err != nil {
+		return nil
+	}
+	return parseTmuxTargets(out)
+}
+
+func parseTmuxTargets(out string) []string {
+	targets := []string{}
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(out, "\n") {
+		v := strings.TrimSpace(ln)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		targets = append(targets, v)
+	}
+	return targets
 }
 
 func desiredTmuxMouseMode() (string, bool) {

@@ -152,6 +152,17 @@ func TestDesiredTmuxMouseModeKeep(t *testing.T) {
 	}
 }
 
+func TestTmuxListTargetsParsesNonEmptyUniqueLines(t *testing.T) {
+	out := "s1\ns2\n\ns2\n  s3  \n"
+	targets := parseTmuxTargets(out)
+	if len(targets) != 3 {
+		t.Fatalf("expected 3 targets, got %d (%#v)", len(targets), targets)
+	}
+	if targets[0] != "s1" || targets[1] != "s2" || targets[2] != "s3" {
+		t.Fatalf("unexpected targets: %#v", targets)
+	}
+}
+
 func TestSoftAttachPaneCommandUsesReadOnlyAttach(t *testing.T) {
 	cmd := softAttachPaneCommand("my-session")
 	if !strings.Contains(cmd, "TMUX=") {
