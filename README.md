@@ -39,7 +39,7 @@ tmux behavior untouched with `ECHOSHELL_TMUX_MOUSE=keep`.
 - `Left/Right`: prev/next repo
 - `Up/Down`: move through repos and sessions
 - `Enter`: attach selected session
-- `n`: spawn `neovim` (`nvim`)
+- `n`: spawn `neovim` (`nvim .`)
 - `Ctrl+n`: new session template menu
 - `d`: destroy selected session
 - `0`: menu (refresh/update/quit)

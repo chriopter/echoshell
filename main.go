@@ -752,7 +752,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Destroying " + sel.Name + "..."
 			return m, killSessionCmd(sel.Name)
 		case "n":
-			return m, spawnAndAttachCmd(m, "neovim", "nvim")
+			return m, spawnAndAttachCmd(m, "neovim", "nvim .")
 		case "ctrl+n":
 			m.selectingNew = true
 			m.selectedTemplate = 0
@@ -1471,7 +1471,7 @@ func defaultSessionTemplates() []sessionTemplate {
 		{Label: "Claude FULL (sandbox off)", Name: "claude-full", Command: "IS_SANDBOX=1 claude --dangerously-skip-permissions"},
 		{Label: "OpenCode (opencode)", Name: "opencode", Command: "opencode"},
 		{Label: "Lazygit (lazygit)", Name: "lazygit", Command: "lazygit"},
-		{Label: "Neovim (nvim)", Name: "neovim", Command: "nvim"},
+		{Label: "Neovim (nvim .)", Name: "neovim", Command: "nvim ."},
 	}
 }
 
