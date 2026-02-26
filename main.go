@@ -752,6 +752,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Destroying " + sel.Name + "..."
 			return m, killSessionCmd(sel.Name)
 		case "n":
+			return m, spawnAndAttachCmd(m, "neovim", "nvim")
+		case "ctrl+n":
 			m.selectingNew = true
 			m.selectedTemplate = 0
 			m.status = "Choose new session command"
@@ -930,7 +932,7 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, title, "", box, "", help)
 	}
 
-	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (preview right)  enter full attach  n new  d destroy  r refresh  0 menu  o opencode  l lazygit  c claude  b bash")
+	helpNav := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render("1-9 repo  tab repo  arrows nav (preview right)  enter full attach  n neovim  ctrl+n new  d destroy  r refresh  0 menu  o opencode  l lazygit  c claude  b bash")
 	help := helpNav
 	status := lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Render("status: " + m.status)
 
@@ -1469,6 +1471,7 @@ func defaultSessionTemplates() []sessionTemplate {
 		{Label: "Claude FULL (sandbox off)", Name: "claude-full", Command: "IS_SANDBOX=1 claude --dangerously-skip-permissions"},
 		{Label: "OpenCode (opencode)", Name: "opencode", Command: "opencode"},
 		{Label: "Lazygit (lazygit)", Name: "lazygit", Command: "lazygit"},
+		{Label: "Neovim (nvim)", Name: "neovim", Command: "nvim"},
 	}
 }
 
